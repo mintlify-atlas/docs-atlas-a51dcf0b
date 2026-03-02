@@ -1,0 +1,521 @@
+---
+title: 'Namespace Isolation'
+description: 'Multi-tenant data isolation with per-namespace collections, graphs, and access control'
+icon: 'shield'
+---
+
+## Overview
+
+Namespace isolation enables **multi-tenant** applications to share a single SochDB instance while maintaining strict data separation. Each tenant gets their own isolated namespace with separate collections, vector indexes, and graph data.
+
+<Note>
+**Why Namespaces?** Instead of deploying a separate database per tenant (expensive, complex), use namespaces to isolate tenants in one SochDB instance with guaranteed security boundaries.
+</Note>
+
+## Key Features
+
+- **Strict Isolation**: No cross-namespace data access (enforced at storage layer)
+- **Per-Namespace Collections**: Each tenant has independent vector collections
+- **Per-Namespace Graphs**: Isolated graph overlays for agent memory
+- **Resource Management**: Per-namespace quotas and limits
+- **Zero Overhead**: Namespace switching is O(1) (just a key prefix)
+
+## Storage Model
+
+Namespaces are implemented as **key prefixes** in SochDB's storage:
+
+```
+_ns/{namespace}/collections/{collection_name}/...
+_ns/{namespace}/graphs/{graph_id}/...
+_ns/{namespace}/kv/{key_path}
+```
+
+This enables:
+- **O(1) namespace creation**: No schema setup needed
+- **O(1) namespace switching**: Just change the key prefix
+- **Efficient scanning**: Prefix-based isolation at storage layer
+
+## Quick Start
+
+### Python
+
+<CodeGroup>
+```python Basic Multi-Tenant Setup
+from sochdb import Database, CollectionConfig, DistanceMetric
+
+db = Database.open("./multi_tenant_db")
+
+# Tenant A
+with db.use_namespace("tenant_acme") as ns:
+    # Create collection in Acme's namespace
+    collection = ns.create_collection(
+        CollectionConfig(
+            name="documents",
+            dimension=768,
+            metric=DistanceMetric.COSINE,
+            enable_hybrid_search=True,
+            content_field="text"
+        )
+    )
+    
+    # Insert Acme's data
+    collection.insert(
+        id="doc_1",
+        vector=acme_embedding,
+        metadata={"title": "Acme Internal Doc", "confidential": True}
+    )
+
+# Tenant B (isolated)
+with db.use_namespace("tenant_techcorp") as ns:
+    # Same collection name, different namespace = different data
+    collection = ns.create_collection(
+        CollectionConfig(
+            name="documents",  # Same name, different namespace
+            dimension=768,
+            metric=DistanceMetric.COSINE
+        )
+    )
+    
+    # Insert TechCorp's data
+    collection.insert(
+        id="doc_1",  # Same ID, different namespace = different doc
+        vector=techcorp_embedding,
+        metadata={"title": "TechCorp Public Doc", "public": True}
+    )
+
+# TechCorp CANNOT access Acme's data
+with db.use_namespace("tenant_techcorp") as ns:
+    collection = ns.collection("documents")
+    results = collection.search(query_embedding, k=10)
+    # Returns only TechCorp docs, never Acme docs
+```
+
+```python Namespace Management
+from sochdb import Database
+
+db = Database.open("./app_db")
+
+# List all namespaces
+namespaces = db.list_namespaces()
+print(f"Tenants: {namespaces}")
+
+# Get namespace info
+info = db.get_namespace_info("tenant_acme")
+print(f"Collections: {info['collections']}")
+print(f"Storage used: {info['storage_bytes']}")
+
+# Delete namespace (removes ALL data)
+db.delete_namespace("tenant_old")  # Careful! Permanent deletion
+```
+
+```python Per-Tenant Configuration
+from sochdb import Database, NamespaceConfig
+
+db = Database.open("./app_db")
+
+# Create namespace with quotas
+db.create_namespace(
+    "tenant_startup",
+    config=NamespaceConfig(
+        max_collections=10,
+        max_storage_bytes=1_000_000_000,  # 1 GB
+        max_vectors=100_000
+    )
+)
+
+# Namespace hits quota
+try:
+    with db.use_namespace("tenant_startup") as ns:
+        # Attempt to create 11th collection
+        ns.create_collection(CollectionConfig(name="collection_11", dimension=768))
+except QuotaExceededError as e:
+    print(f"Quota exceeded: {e}")
+    # Upgrade tenant or notify admin
+```
+</CodeGroup>
+
+### Rust
+
+```rust
+use sochdb::{
+    Connection, CollectionConfig, DistanceMetric, NamespaceConfig
+};
+
+let conn = Connection::open("./multi_tenant_db")?;
+
+// Tenant A
+{
+    let ns = conn.namespace("tenant_acme");
+    
+    let config = CollectionConfig {
+        name: "documents".to_string(),
+        dimension: 768,
+        metric: DistanceMetric::Cosine,
+        ..Default::default()
+    };
+    
+    let collection = ns.create_collection(config)?;
+    collection.insert("doc_1", &acme_embedding, Some(acme_metadata))?;
+}
+
+// Tenant B (isolated)
+{
+    let ns = conn.namespace("tenant_techcorp");
+    let config = CollectionConfig {
+        name: "documents".to_string(),  // Same name, different namespace
+        dimension: 768,
+        metric: DistanceMetric::Cosine,
+        ..Default::default()
+    };
+    
+    let collection = ns.create_collection(config)?;
+    collection.insert("doc_1", &techcorp_embedding, Some(techcorp_metadata))?;
+}
+
+// Search is isolated
+let ns = conn.namespace("tenant_techcorp");
+let collection = ns.collection("documents")?;
+let results = collection.search(&query_embedding, 10, None)?;
+// Returns only TechCorp docs
+```
+
+## Collection Management
+
+### Creating Collections
+
+```python
+from sochdb import Database, CollectionConfig, DistanceMetric
+
+db = Database.open("./app_db")
+
+with db.use_namespace("tenant_acme") as ns:
+    # Create vector collection
+    docs_collection = ns.create_collection(
+        CollectionConfig(
+            name="documents",
+            dimension=768,
+            metric=DistanceMetric.COSINE,
+            enable_hybrid_search=True,
+            content_field="text"
+        )
+    )
+    
+    # Create another collection (same namespace)
+    images_collection = ns.create_collection(
+        CollectionConfig(
+            name="images",
+            dimension=512,  # Different dimension
+            metric=DistanceMetric.EUCLIDEAN,
+            enable_hybrid_search=False
+        )
+    )
+```
+
+### Listing Collections
+
+```python
+with db.use_namespace("tenant_acme") as ns:
+    collections = ns.list_collections()
+    print(f"Collections: {collections}")
+    # Output: ['documents', 'images']
+    
+    # Get collection info
+    info = ns.get_collection_info("documents")
+    print(f"Dimension: {info['dimension']}")
+    print(f"Vector count: {info['vector_count']}")
+    print(f"Metric: {info['metric']}")
+```
+
+### Deleting Collections
+
+```python
+with db.use_namespace("tenant_acme") as ns:
+    # Delete collection (removes all vectors and metadata)
+    ns.delete_collection("old_collection")
+```
+
+<Warning>
+**Permanent Deletion**: `delete_collection()` immediately removes all data. There is no undo. Consider implementing soft deletes in your application if you need recovery.
+</Warning>
+
+## Graph Isolation
+
+Graph Overlays are also namespace-isolated:
+
+```python
+from sochdb import Database, GraphOverlay
+
+db = Database.open("./app_db")
+
+# Tenant A's graph
+with db.use_namespace("tenant_acme") as ns:
+    graph = GraphOverlay(db, namespace="tenant_acme")
+    
+    graph.add_node("user_alice", "person", {"name": "Alice (Acme)"})
+    graph.add_node("project_1", "project", {"name": "Acme Project"})
+    graph.add_edge("user_alice", "project_1", "works_on")
+
+# Tenant B's graph (isolated)
+with db.use_namespace("tenant_techcorp") as ns:
+    graph = GraphOverlay(db, namespace="tenant_techcorp")
+    
+    # Same node ID, different namespace = different entity
+    graph.add_node("user_alice", "person", {"name": "Alice (TechCorp)"})
+    graph.add_node("project_1", "project", {"name": "TechCorp Project"})
+    graph.add_edge("user_alice", "project_1", "works_on")
+
+# Query graph (isolated)
+with db.use_namespace("tenant_acme") as ns:
+    graph = GraphOverlay(db, namespace="tenant_acme")
+    node = graph.get_node("user_alice")
+    print(node.properties["name"])  # "Alice (Acme)"
+    
+    # Cannot access TechCorp's graph
+```
+
+## Use Cases
+
+<AccordionGroup>
+  <Accordion title="SaaS Application (Multi-Tenant)">
+    **Scenario**: SaaS CRM with 1000+ customers
+    
+    ```python
+    # Each customer gets a namespace
+    def setup_customer(customer_id):
+        db = Database.open("./crm_db")
+        
+        namespace = f"customer_{customer_id}"
+        db.create_namespace(
+            namespace,
+            config=NamespaceConfig(
+                max_collections=20,
+                max_storage_bytes=5_000_000_000,  # 5 GB per customer
+                max_vectors=500_000
+            )
+        )
+        
+        with db.use_namespace(namespace) as ns:
+            # Contacts collection
+            ns.create_collection(
+                CollectionConfig(
+                    name="contacts",
+                    dimension=768,
+                    metric=DistanceMetric.COSINE,
+                    enable_hybrid_search=True,
+                    content_field="notes"
+                )
+            )
+            
+            # Deals collection
+            ns.create_collection(
+                CollectionConfig(
+                    name="deals",
+                    dimension=768,
+                    metric=DistanceMetric.COSINE
+                )
+            )
+    
+    # Usage
+    def search_contacts(customer_id, query):
+        db = Database.open("./crm_db")
+        namespace = f"customer_{customer_id}"
+        
+        with db.use_namespace(namespace) as ns:
+            collection = ns.collection("contacts")
+            results = collection.search(query_embedding, k=10)
+            return results  # Only this customer's contacts
+    ```
+  </Accordion>
+  
+  <Accordion title="Development/Staging/Production Environments">
+    **Scenario**: Separate data for dev/staging/prod in one database
+    
+    ```python
+    # Environment-based namespaces
+    import os
+    
+    ENV = os.getenv("ENVIRONMENT", "development")
+    NAMESPACE = f"env_{ENV}"
+    
+    db = Database.open("./app_db")
+    
+    with db.use_namespace(NAMESPACE) as ns:
+        collection = ns.collection("documents")
+        # Automatically uses correct environment data
+    ```
+    
+    **Benefits**:
+    - Single database instance for all environments
+    - No cross-environment data leakage
+    - Easy environment switching
+  </Accordion>
+  
+  <Accordion title="Multi-Region Deployment">
+    **Scenario**: Geo-distributed app with region-specific data
+    
+    ```python
+    # Region-based namespaces
+    def get_namespace_for_region(region):
+        return f"region_{region}"
+    
+    # US region
+    with db.use_namespace(get_namespace_for_region("us")) as ns:
+        collection = ns.collection("documents")
+        collection.insert("doc_1", us_embedding, {"region": "us"})
+    
+    # EU region (isolated)
+    with db.use_namespace(get_namespace_for_region("eu")) as ns:
+        collection = ns.collection("documents")
+        collection.insert("doc_1", eu_embedding, {"region": "eu"})
+    
+    # Query respects region
+    user_region = get_user_region(user_id)
+    with db.use_namespace(get_namespace_for_region(user_region)) as ns:
+        collection = ns.collection("documents")
+        results = collection.search(query_embedding, k=10)
+        # Returns only region-specific results
+    ```
+  </Accordion>
+  
+  <Accordion title="Agent-Per-User Isolation">
+    **Scenario**: Each user has a personal AI agent with isolated memory
+    
+    ```python
+    from sochdb import Database, GraphOverlay
+    
+    def get_user_agent_memory(user_id):
+        db = Database.open("./agents_db")
+        namespace = f"user_{user_id}"
+        
+        # User's personal graph
+        graph = GraphOverlay(db, namespace=namespace)
+        
+        # User's vector collection
+        with db.use_namespace(namespace) as ns:
+            if "memory" not in ns.list_collections():
+                ns.create_collection(
+                    CollectionConfig(
+                        name="memory",
+                        dimension=768,
+                        metric=DistanceMetric.COSINE
+                    )
+                )
+            
+            collection = ns.collection("memory")
+        
+        return graph, collection
+    
+    # Usage
+    graph, memory = get_user_agent_memory("user_123")
+    graph.add_node("msg_1", "message", {"content": "Hello"})
+    memory.insert("msg_1", embedding, {"timestamp": "2024-03-15"})
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Security Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Never Trust User Input" icon="shield-halved">
+    Always validate namespace names:
+    ```python
+    import re
+    
+    def validate_namespace(name):
+        # Only alphanumeric, underscore, hyphen
+        if not re.match(r'^[a-zA-Z0-9_-]+$', name):
+            raise ValueError("Invalid namespace")
+        return name
+    
+    # Usage
+    tenant_id = request.get("tenant_id")
+    namespace = validate_namespace(f"tenant_{tenant_id}")
+    ```
+  </Card>
+  
+  <Card title="Use Application-Level Auth" icon="lock">
+    SochDB enforces namespace isolation, but you must authenticate users:
+    ```python
+    def get_user_namespace(user_id, session):
+        # Verify user owns this namespace
+        user = db_auth.get_user(user_id)
+        if session.user_id != user.id:
+            raise Unauthorized("Access denied")
+        
+        return f"user_{user.id}"
+    ```
+  </Card>
+  
+  <Card title="Set Resource Quotas" icon="gauge-high">
+    Prevent resource exhaustion:
+    ```python
+    db.create_namespace(
+        "tenant_free",
+        config=NamespaceConfig(
+            max_collections=5,
+            max_storage_bytes=100_000_000,  # 100 MB
+            max_vectors=10_000
+        )
+    )
+    ```
+  </Card>
+  
+  <Card title="Audit Namespace Access" icon="clipboard-list">
+    Log all namespace operations:
+    ```python
+    def audit_log(user_id, namespace, operation):
+        log.info(f"User {user_id}: {operation} on {namespace}")
+    
+    with db.use_namespace(namespace) as ns:
+        audit_log(user_id, namespace, "READ")
+        collection = ns.collection("docs")
+    ```
+  </Card>
+</CardGroup>
+
+## Performance
+
+| Operation | Time Complexity | Notes |
+|-----------|----------------|-------|
+| Create namespace | O(1) | Just a key prefix |
+| Switch namespace | O(1) | Change prefix variable |
+| List namespaces | O(N) | Scans all namespace prefixes |
+| Delete namespace | O(K) | K = keys in namespace |
+
+<Note>
+**Benchmark** (1000 namespaces, Apple M1):
+- Namespace creation: {"<"}0.01ms
+- Namespace switching: {"<"}0.001ms (no overhead)
+- Collection creation: 0.5-2ms (same as single-tenant)
+</Note>
+
+## Comparison with Other Approaches
+
+| Approach | Isolation | Resource Sharing | Management Complexity | SochDB Equivalent |
+|----------|-----------|------------------|----------------------|-------------------|
+| **Database per tenant** | ✅ Perfect | ❌ None | ❌ High (1000s of DBs) | — |
+| **Schema per tenant** | ✅ Strong | ⚠️ Limited | ⚠️ Medium | — |
+| **Table per tenant** | ⚠️ Weak | ✅ Good | ⚠️ Medium | — |
+| **Row-level filtering** | ❌ App-level | ✅ Excellent | ✅ Low | — |
+| **Namespace isolation** | ✅ Storage-level | ✅ Excellent | ✅ Low | ✅ Yes |
+
+## Limitations
+
+<Warning>
+**Current Limitations**:
+- No cross-namespace queries (by design—security boundary)
+- No namespace-level backup/restore (coming in v0.6)
+- No automatic quota enforcement (manual checks required)
+- Maximum 10,000 namespaces per database (configurable)
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Policy Hooks" icon="gavel" href="/features/policy-hooks">
+    Add access control policies to namespaces
+  </Card>
+  <Card title="Graph Overlay" icon="diagram-project" href="/features/graph-overlay">
+    Build isolated graphs per namespace
+  </Card>
+</CardGroup>

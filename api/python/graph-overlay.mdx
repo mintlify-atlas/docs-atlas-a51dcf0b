@@ -1,0 +1,390 @@
+---
+title: 'Graph Overlay'
+description: 'Lightweight relationship tracking for agent memory with BFS/DFS traversal'
+icon: 'diagram-project'
+---
+
+The Graph Overlay feature provides lightweight relationship tracking on top of SochDB's key-value store, enabling graph-based memory for AI agents.
+
+<Note>
+  Graph Overlay is a lightweight feature built on SochDB's core database. It stores graph edges as key-value pairs with efficient prefix scanning for traversal operations.
+</Note>
+
+## Core Concepts
+
+Graph Overlay allows you to:
+- Track relationships between entities (users, documents, concepts)
+- Perform graph traversals (BFS, DFS) for connected data
+- Build agent memory systems with relationship awareness
+- Combine vector similarity with graph structure
+
+## Creating a Graph Overlay
+
+Graph operations are performed through the database connection with graph-specific methods:
+
+```python
+from sochdb import Database
+
+# Open database
+db = Database.open("./my_db")
+
+# Graph operations use the same database instance
+# Nodes and edges are stored as key-value pairs with special prefixes
+```
+
+## Node Operations
+
+### add_node()
+
+Add a node to the graph.
+
+<ParamField path="node_id" type="str" required>
+  Unique identifier for the node
+</ParamField>
+
+<ParamField path="data" type="dict" default="{}">
+  Node metadata as a dictionary
+</ParamField>
+
+```python
+import json
+
+# Add nodes with metadata
+node_data = {"type": "user", "name": "Alice"}
+db.put(b"graph:node:alice", json.dumps(node_data).encode())
+
+# Add document node
+doc_data = {"type": "document", "title": "RAG Guide"}
+db.put(b"graph:node:doc_1", json.dumps(doc_data).encode())
+```
+
+## Edge Operations
+
+### add_edge()
+
+Add a directed edge between two nodes.
+
+<ParamField path="from_node" type="str" required>
+  Source node ID
+</ParamField>
+
+<ParamField path="to_node" type="str" required>
+  Target node ID
+</ParamField>
+
+<ParamField path="edge_type" type="str" default="relates_to">
+  Type of relationship (e.g., "authored", "cited", "depends_on")
+</ParamField>
+
+<ParamField path="weight" type="float" default="1.0">
+  Edge weight for weighted graphs
+</ParamField>
+
+```python
+# Add edges between nodes
+edge_data = {
+    "from": "alice",
+    "to": "doc_1",
+    "type": "authored",
+    "weight": 1.0,
+    "timestamp": "2024-01-15"
+}
+key = b"graph:edge:alice:doc_1"
+db.put(key, json.dumps(edge_data).encode())
+
+# Add reverse edge for undirected graph
+reverse_key = b"graph:edge:doc_1:alice"
+db.put(reverse_key, json.dumps(edge_data).encode())
+```
+
+## Graph Traversal
+
+### get_neighbors()
+
+Get all neighbors of a node.
+
+<ParamField path="node_id" type="str" required>
+  Node ID to find neighbors for
+</ParamField>
+
+<ParamField path="direction" type="str" default="outgoing">
+  Edge direction:
+  - `"outgoing"` - Nodes this node points to
+  - `"incoming"` - Nodes pointing to this node
+  - `"both"` - All connected nodes
+</ParamField>
+
+<ResponseField name="return" type="List[Tuple[str, dict]]">
+  List of (node_id, edge_data) tuples
+</ResponseField>
+
+```python
+import json
+
+def get_neighbors(db, node_id, direction="outgoing"):
+    """Get neighbors of a node."""
+    neighbors = []
+    
+    if direction in ("outgoing", "both"):
+        # Scan outgoing edges
+        prefix = f"graph:edge:{node_id}:".encode()
+        for key, value in db.scan(prefix):
+            edge = json.loads(value.decode())
+            neighbors.append((edge["to"], edge))
+    
+    if direction in ("incoming", "both"):
+        # Scan all edges to find incoming
+        for key, value in db.scan(b"graph:edge:"):
+            edge = json.loads(value.decode())
+            if edge["to"] == node_id:
+                neighbors.append((edge["from"], edge))
+    
+    return neighbors
+
+# Usage
+neighbors = get_neighbors(db, "alice")
+for neighbor_id, edge_data in neighbors:
+    print(f"Alice -> {neighbor_id} ({edge_data['type']})")
+```
+
+### bfs()
+
+Breadth-first search traversal from a starting node.
+
+<ParamField path="start_node" type="str" required>
+  Node ID to start traversal from
+</ParamField>
+
+<ParamField path="max_depth" type="int" default="None">
+  Maximum depth to traverse (None for unlimited)
+</ParamField>
+
+<ParamField path="filter_fn" type="callable" default="None">
+  Optional filter function `(node_id, node_data) -> bool`
+</ParamField>
+
+<ResponseField name="return" type="List[Tuple[str, int]]">
+  List of (node_id, depth) tuples in BFS order
+</ResponseField>
+
+```python
+from collections import deque
+import json
+
+def bfs(db, start_node, max_depth=None):
+    """Breadth-first search traversal."""
+    visited = set()
+    queue = deque([(start_node, 0)])
+    result = []
+    
+    while queue:
+        node_id, depth = queue.popleft()
+        
+        if node_id in visited:
+            continue
+        if max_depth is not None and depth > max_depth:
+            continue
+        
+        visited.add(node_id)
+        result.append((node_id, depth))
+        
+        # Get neighbors
+        neighbors = get_neighbors(db, node_id)
+        for neighbor_id, _ in neighbors:
+            if neighbor_id not in visited:
+                queue.append((neighbor_id, depth + 1))
+    
+    return result
+
+# Find all nodes within 2 hops of alice
+reachable = bfs(db, "alice", max_depth=2)
+for node_id, depth in reachable:
+    print(f"Depth {depth}: {node_id}")
+```
+
+### dfs()
+
+Depth-first search traversal from a starting node.
+
+<ParamField path="start_node" type="str" required>
+  Node ID to start traversal from
+</ParamField>
+
+<ParamField path="max_depth" type="int" default="None">
+  Maximum depth to traverse
+</ParamField>
+
+<ResponseField name="return" type="List[Tuple[str, int]]">
+  List of (node_id, depth) tuples in DFS order
+</ResponseField>
+
+```python
+import json
+
+def dfs(db, start_node, max_depth=None):
+    """Depth-first search traversal."""
+    visited = set()
+    result = []
+    
+    def _dfs_helper(node_id, depth):
+        if node_id in visited:
+            return
+        if max_depth is not None and depth > max_depth:
+            return
+        
+        visited.add(node_id)
+        result.append((node_id, depth))
+        
+        # Recurse on neighbors
+        neighbors = get_neighbors(db, node_id)
+        for neighbor_id, _ in neighbors:
+            _dfs_helper(neighbor_id, depth + 1)
+    
+    _dfs_helper(start_node, 0)
+    return result
+
+# DFS from alice
+path = dfs(db, "alice", max_depth=3)
+for node_id, depth in path:
+    print(f"{'  ' * depth}{node_id}")
+```
+
+## Agent Memory Example
+
+Combine graph overlay with vector search for agent memory:
+
+```python
+import json
+import numpy as np
+from sochdb import Database, HnswIndex
+
+# Setup
+db = Database.open("./agent_memory")
+index = HnswIndex(dimension=768)
+
+def add_memory(user_id, memory_text, embedding, memory_type="interaction"):
+    """Add a memory with graph links."""
+    memory_id = f"mem_{hash(memory_text) % 10000}"
+    
+    # Store memory node
+    memory_data = {
+        "text": memory_text,
+        "type": memory_type,
+        "user": user_id
+    }
+    db.put(f"graph:node:{memory_id}".encode(), json.dumps(memory_data).encode())
+    
+    # Add vector for similarity search
+    idx = index.insert_batch(embedding.reshape(1, -1))
+    
+    # Link to user
+    edge_data = {"from": user_id, "to": memory_id, "type": "has_memory"}
+    db.put(f"graph:edge:{user_id}:{memory_id}".encode(), json.dumps(edge_data).encode())
+    
+    return memory_id
+
+def recall_memories(user_id, query_embedding, k=5, include_related=True):
+    """Recall memories using vector search + graph traversal."""
+    # Vector search for similar memories
+    ids, distances = index.search(query_embedding, k=k)
+    
+    memories = []
+    for id, dist in zip(ids, distances):
+        memory_id = f"mem_{id}"
+        
+        # Get memory data
+        data = db.get(f"graph:node:{memory_id}".encode())
+        if data:
+            memory = json.loads(data.decode())
+            memories.append((memory_id, memory, dist))
+            
+            # Optionally get related memories via graph
+            if include_related:
+                neighbors = get_neighbors(db, memory_id)
+                for neighbor_id, edge in neighbors[:2]:  # Top 2 related
+                    neighbor_data = db.get(f"graph:node:{neighbor_id}".encode())
+                    if neighbor_data:
+                        related = json.loads(neighbor_data.decode())
+                        memories.append((neighbor_id, related, dist * 1.5))
+    
+    return memories
+
+# Usage
+user_query_emb = np.random.randn(768).astype(np.float32)
+memories = recall_memories("alice", user_query_emb, k=5)
+
+for mem_id, mem_data, score in memories:
+    print(f"[{score:.3f}] {mem_data['text']}")
+```
+
+## Complete Example
+
+```python
+import json
+from sochdb import Database
+
+# Create knowledge graph
+db = Database.open("./knowledge_graph")
+
+# Add entities
+entities = [
+    {"id": "python", "type": "language", "name": "Python"},
+    {"id": "rust", "type": "language", "name": "Rust"},
+    {"id": "sochdb", "type": "database", "name": "SochDB"},
+    {"id": "alice", "type": "developer", "name": "Alice"},
+]
+
+for entity in entities:
+    key = f"graph:node:{entity['id']}".encode()
+    db.put(key, json.dumps(entity).encode())
+
+# Add relationships
+relations = [
+    ("sochdb", "rust", "written_in"),
+    ("sochdb", "python", "has_sdk"),
+    ("alice", "sochdb", "uses"),
+    ("alice", "python", "knows"),
+]
+
+for from_id, to_id, rel_type in relations:
+    edge_data = {"from": from_id, "to": to_id, "type": rel_type}
+    key = f"graph:edge:{from_id}:{to_id}".encode()
+    db.put(key, json.dumps(edge_data).encode())
+
+# Query: What does Alice use?
+for key, value in db.scan(b"graph:edge:alice:"):
+    edge = json.loads(value.decode())
+    if edge["type"] == "uses":
+        # Get target node
+        node_key = f"graph:node:{edge['to']}".encode()
+        node_data = db.get(node_key)
+        if node_data:
+            node = json.loads(node_data.decode())
+            print(f"Alice uses {node['name']}")
+
+# Find all technologies Alice works with (2 hops)
+reachable = bfs(db, "alice", max_depth=2)
+for node_id, depth in reachable:
+    if depth > 0:  # Skip alice herself
+        node_key = f"graph:node:{node_id}".encode()
+        node_data = db.get(node_key)
+        if node_data:
+            node = json.loads(node_data.decode())
+            print(f"Depth {depth}: {node['name']} ({node['type']})")
+```
+
+## Performance Notes
+
+- **Storage**: Graph edges are stored as key-value pairs with prefix `graph:edge:`
+- **Scanning**: Neighbor lookups use prefix scans (`O(neighbors)` time)
+- **Traversal**: BFS/DFS performance depends on graph density and depth
+- **Indexing**: For large graphs, consider maintaining in-memory adjacency lists
+- **Transactions**: Use transactions when adding multiple nodes/edges atomically
+
+## Best Practices
+
+1. **Use consistent prefixes**: `graph:node:` for nodes, `graph:edge:` for edges
+2. **Store metadata**: Include timestamps, weights, and types in edge data
+3. **Index by type**: Add secondary indices for node/edge types if needed
+4. **Limit traversal depth**: Set `max_depth` to avoid deep recursion
+5. **Combine with vectors**: Use graph structure + vector similarity for hybrid retrieval

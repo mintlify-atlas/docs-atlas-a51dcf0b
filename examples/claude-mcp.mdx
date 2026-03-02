@@ -1,0 +1,450 @@
+---
+title: 'Claude MCP Integration'
+description: 'Connect SochDB to Claude Desktop, Cursor, and other AI assistants using the Model Context Protocol'
+---
+
+## Overview
+
+The Model Context Protocol (MCP) allows AI assistants to access SochDB as a tool. This enables:
+- **Direct database access** from Claude Desktop
+- **Semantic search** within conversations
+- **State persistence** across sessions
+- **Knowledge base queries** from any MCP client
+
+## Use Case
+
+Connect Claude Desktop to SochDB to:
+- Search your personal knowledge base
+- Store and retrieve conversation context
+- Maintain long-term memory across sessions
+- Query structured data with natural language
+
+## Architecture
+
+```
+┌─────────────────┐
+│  Claude Desktop │
+│   (MCP Client)  │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  SochDB MCP     │
+│    Server       │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│   SochDB        │
+│   Database      │
+└─────────────────┘
+```
+
+## Setup
+
+<Steps>
+
+### Build the MCP Server
+
+```bash
+# Clone SochDB repository
+git clone https://github.com/sushanthpy/sochdb.git
+cd sochdb
+
+# Build the MCP server
+cargo build --release -p sochdb-mcp
+
+# Verify it works
+./target/release/sochdb-mcp --help
+```
+
+### Configure Claude Desktop
+
+<Tabs>
+  <Tab title="macOS">
+    ```bash
+    # Open Claude Desktop config
+    open ~/Library/Application\ Support/Claude/claude_desktop_config.json
+    ```
+    
+    Add this configuration:
+    
+    ```json
+    {
+      "mcpServers": {
+        "sochdb": {
+          "command": "/path/to/sochdb/target/release/sochdb-mcp",
+          "args": ["--db", "/path/to/your/database"],
+          "env": {
+            "RUST_LOG": "info"
+          }
+        }
+      }
+    }
+    ```
+  </Tab>
+  
+  <Tab title="Windows">
+    ```powershell
+    # Open Claude Desktop config
+    notepad %APPDATA%\Claude\claude_desktop_config.json
+    ```
+    
+    Add this configuration:
+    
+    ```json
+    {
+      "mcpServers": {
+        "sochdb": {
+          "command": "C:\\path\\to\\sochdb-mcp.exe",
+          "args": ["--db", "C:\\path\\to\\database"],
+          "env": {
+            "RUST_LOG": "info"
+          }
+        }
+      }
+    }
+    ```
+  </Tab>
+  
+  <Tab title="Linux">
+    ```bash
+    # Open Claude Desktop config
+    nano ~/.config/Claude/claude_desktop_config.json
+    ```
+    
+    Add this configuration:
+    
+    ```json
+    {
+      "mcpServers": {
+        "sochdb": {
+          "command": "/path/to/sochdb/target/release/sochdb-mcp",
+          "args": ["--db", "/path/to/your/database"],
+          "env": {
+            "RUST_LOG": "info"
+          }
+        }
+      }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+### Restart Claude Desktop
+
+Restart Claude Desktop for the configuration to take effect.
+
+Look for the 🔧 tools icon to confirm SochDB is connected.
+
+### Test the Connection
+
+In Claude Desktop, try:
+
+> "Can you store 'Paris is the capital of France' in SochDB with the key 'fact/paris'?"
+
+Claude should use the `put` tool to store the data.
+
+Then try:
+
+> "What did we store about Paris?"
+
+Claude should use the `get` tool to retrieve it.
+
+</Steps>
+
+## Available Tools
+
+Once connected, Claude can use these SochDB tools:
+
+### Key-Value Operations
+
+| Tool | Description | Example |
+|------|-------------|--------|
+| `put` | Store a key-value pair | Store user preferences |
+| `get` | Retrieve a value by key | Get saved settings |
+| `delete` | Remove a key | Delete old data |
+| `scan` | List keys with prefix | Find all user/* keys |
+
+### Query Operations
+
+| Tool | Description | Example |
+|------|-------------|--------|
+| `query` | Execute SochQL queries | Complex data queries |
+| `create_table` | Create a new table | Set up schema |
+| `insert` | Insert rows into table | Add records |
+| `select` | Query table data | Read records |
+
+### Episode Management
+
+| Tool | Description | Example |
+|------|-------------|--------|
+| `create_episode` | Start conversation episode | Begin chat session |
+| `add_turn` | Add message to episode | Save chat turn |
+| `search_episodes` | Search conversation history | Find past discussions |
+
+## Usage Examples
+
+### Example 1: Personal Knowledge Base
+
+**User:** "Store this fact: SochDB achieves 117,000 vector inserts per second"
+
+**Claude uses:**
+```json
+{
+  "tool": "put",
+  "key": "facts/sochdb/performance",
+  "value": "SochDB achieves 117,000 vector inserts per second"
+}
+```
+
+**User:** "What do you know about SochDB performance?"
+
+**Claude uses:**
+```json
+{
+  "tool": "get",
+  "key": "facts/sochdb/performance"
+}
+```
+
+### Example 2: Conversation Memory
+
+**User:** "Remember that my favorite programming language is Python"
+
+**Claude uses:**
+```json
+{
+  "tool": "put",
+  "key": "users/alice/preferences/language",
+  "value": "Python"
+}
+```
+
+**Later...**
+
+**User:** "What's my favorite language?"
+
+**Claude uses:**
+```json
+{
+  "tool": "get",
+  "key": "users/alice/preferences/language"
+}
+```
+
+### Example 3: Structured Data
+
+**User:** "Create a table to track my reading list"
+
+**Claude uses:**
+```json
+{
+  "tool": "create_table",
+  "table": "reading_list",
+  "schema": {
+    "title": "string",
+    "author": "string",
+    "status": "string",
+    "rating": "number"
+  }
+}
+```
+
+**User:** "Add 'The Pragmatic Programmer' by Hunt and Thomas, status reading"
+
+**Claude uses:**
+```json
+{
+  "tool": "insert",
+  "table": "reading_list",
+  "data": {
+    "title": "The Pragmatic Programmer",
+    "author": "Hunt and Thomas",
+    "status": "reading",
+    "rating": null
+  }
+}
+```
+
+## Other MCP Clients
+
+### Cursor IDE
+
+**Config location:** `~/.cursor/mcp.json`
+
+```json
+{
+  "mcpServers": {
+    "sochdb": {
+      "command": "/path/to/sochdb-mcp",
+      "args": ["--db", "/path/to/database"]
+    }
+  }
+}
+```
+
+### VS Code + Continue.dev
+
+**Config location:** `~/.continue/config.json`
+
+```json
+{
+  "experimental": {
+    "modelContextProtocolServers": [
+      {
+        "transport": {
+          "type": "stdio",
+          "command": "/path/to/sochdb-mcp",
+          "args": ["--db", "/path/to/database"]
+        }
+      }
+    ]
+  }
+}
+```
+
+### Zed Editor
+
+**Config location:** `~/.config/zed/settings.json`
+
+```json
+{
+  "context_servers": {
+    "sochdb": {
+      "command": {
+        "path": "/path/to/sochdb-mcp",
+        "args": ["--db", "/path/to/database"]
+      }
+    }
+  }
+}
+```
+
+## Troubleshooting
+
+### "Server not found"
+
+<AccordionGroup>
+  <Accordion title="Solution">
+    - Use **absolute path** to `sochdb-mcp` binary
+    - Verify build succeeded: `ls -la target/release/sochdb-mcp`
+    - Check permissions: `chmod +x target/release/sochdb-mcp`
+  </Accordion>
+</AccordionGroup>
+
+### "Database connection failed"
+
+<AccordionGroup>
+  <Accordion title="Solution">
+    - Ensure database path exists or can be created
+    - Check read/write permissions on the directory
+    - Try with a test path: `--db /tmp/test.db`
+  </Accordion>
+</AccordionGroup>
+
+### "No tools showing"
+
+<AccordionGroup>
+  <Accordion title="Solution">
+    - Restart the AI application after config changes
+    - Check logs: set `RUST_LOG=debug` in env
+    - Verify JSON syntax in config file
+    - Look for error messages in Claude Desktop console
+  </Accordion>
+</AccordionGroup>
+
+### "Permission denied"
+
+<AccordionGroup>
+  <Accordion title="Solution">
+    ```bash
+    # macOS: Grant permissions
+    xattr -d com.apple.quarantine /path/to/sochdb-mcp
+    chmod +x /path/to/sochdb-mcp
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Advanced Configuration
+
+### Multiple Databases
+
+```json
+{
+  "mcpServers": {
+    "sochdb-personal": {
+      "command": "/path/to/sochdb-mcp",
+      "args": ["--db", "/path/to/personal.db"]
+    },
+    "sochdb-work": {
+      "command": "/path/to/sochdb-mcp",
+      "args": ["--db", "/path/to/work.db"]
+    }
+  }
+}
+```
+
+### Enable Debug Logging
+
+```json
+{
+  "mcpServers": {
+    "sochdb": {
+      "command": "/path/to/sochdb-mcp",
+      "args": ["--db", "/path/to/database"],
+      "env": {
+        "RUST_LOG": "debug",
+        "RUST_BACKTRACE": "1"
+      }
+    }
+  }
+}
+```
+
+### Custom Port (for network access)
+
+```json
+{
+  "mcpServers": {
+    "sochdb": {
+      "command": "/path/to/sochdb-mcp",
+      "args": [
+        "--db", "/path/to/database",
+        "--port", "8080"
+      ]
+    }
+  }
+}
+```
+
+## Security Considerations
+
+<Warning>
+  **Important:** The MCP server has full access to the database. Only use with trusted clients.
+</Warning>
+
+### Best Practices
+
+1. **Use dedicated databases** for MCP access (not production databases)
+2. **Set file permissions** appropriately (`chmod 600` for database files)
+3. **Audit access logs** regularly
+4. **Avoid storing sensitive data** in plain text
+5. **Use encryption** for sensitive databases
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Agent Memory" href="/examples/agent-memory" icon="brain">
+    Use MCP with agent memory patterns
+  </Card>
+  <Card title="RAG System" href="/examples/rag-system" icon="magnifying-glass">
+    Build RAG with MCP access
+  </Card>
+  <Card title="LangGraph" href="/examples/langgraph" icon="diagram-project">
+    Combine MCP with LangGraph
+  </Card>
+  <Card title="Multi-Tenant" href="/examples/multi-tenant" icon="users">
+    Multi-tenant MCP setups
+  </Card>
+</CardGroup>

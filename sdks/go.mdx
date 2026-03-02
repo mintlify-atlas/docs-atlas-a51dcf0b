@@ -1,0 +1,595 @@
+---
+title: 'Go SDK'
+description: 'Official Go SDK for SochDB with idiomatic Go interfaces'
+icon: 'golang'
+---
+
+## Overview
+
+The SochDB Go SDK provides idiomatic Go interfaces with:
+
+- **Embedded mode (CGO)** for lowest latency
+- **IPC mode (Unix sockets)** for multi-process deployments
+- **Namespace isolation** for multi-tenant apps
+- **Vector search** with HNSW indexing
+- **Transactions** with ACID guarantees
+- **Idiomatic Go patterns** with error handling and defer cleanup
+
+## Installation
+
+```bash
+go get github.com/sochdb/sochdb-go@latest
+```
+
+## Basic Usage
+
+### Opening a Database
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+
+    sochdb "github.com/sochdb/sochdb-go"
+)
+
+func main() {
+    // Open or create a database
+    db, err := sochdb.Open("./my_db")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer db.Close()
+
+    // Basic operations
+    err = db.Put([]byte("greeting"), []byte("Hello, SochDB!"))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    value, err := db.Get([]byte("greeting"))
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Printf("Value: %s\n", string(value))
+}
+```
+
+### Path-Based Access
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+
+    sochdb "github.com/sochdb/sochdb-go"
+)
+
+func main() {
+    db, err := sochdb.Open("./my_db")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer db.Close()
+
+    // Hierarchical key structure
+    err = db.PutPath([]string{"users", "alice", "name"}, []byte("Alice Smith"))
+    if err != nil {
+        log.Fatal(err)
+    }
+    err = db.PutPath([]string{"users", "alice", "email"}, []byte("alice@example.com"))
+    if err != nil {
+        log.Fatal(err)
+    }
+    err = db.PutPath([]string{"users", "bob", "name"}, []byte("Bob Jones"))
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Println("✓ Hierarchical data stored")
+
+    // Read by path
+    aliceName, err := db.GetPath([]string{"users", "alice", "name"})
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Printf("✓ Alice's name: %s\n", string(aliceName))
+
+    // Delete a key
+    err = db.Delete([]byte("greeting"))
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Println("✓ Key 'greeting' deleted")
+
+    // Verify deletion
+    _, err = db.Get([]byte("greeting"))
+    if err == sochdb.ErrNotFound {
+        fmt.Println("✓ Key confirmed deleted")
+    }
+}
+```
+
+### Prefix Queries
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+
+    sochdb "github.com/sochdb/sochdb-go"
+)
+
+func main() {
+    db, err := sochdb.Open("./my_db")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer db.Close()
+
+    // Query prefix scan
+    results, err := db.Query("users/").
+        Limit(10).
+        Execute()
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    fmt.Println("\n✓ Prefix scan results:")
+    for _, kv := range results {
+        fmt.Printf("  %s = %s\n", kv.Key, string(kv.Value))
+    }
+}
+```
+
+## Transactions
+
+### Basic Transactions
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+
+    sochdb "github.com/sochdb/sochdb-go"
+)
+
+func main() {
+    db, err := sochdb.Open("./my_db")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer db.Close()
+
+    // Automatic transaction with callback (recommended)
+    err = db.WithTransaction(func(txn *sochdb.Transaction) error {
+        if err := txn.Put([]byte("accounts/alice/balance"), []byte("1000")); err != nil {
+            return err
+        }
+        if err := txn.Put([]byte("accounts/bob/balance"), []byte("500")); err != nil {
+            return err
+        }
+        fmt.Println("✓ Transaction: wrote initial balances")
+        return nil
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Println("✓ Transaction committed automatically")
+}
+```
+
+### Account Transfer Example
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+    "strconv"
+
+    sochdb "github.com/sochdb/sochdb-go"
+)
+
+func main() {
+    db, err := sochdb.Open("./bank_db")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer db.Close()
+
+    // Initialize accounts
+    err = db.WithTransaction(func(txn *sochdb.Transaction) error {
+        if err := txn.Put([]byte("accounts/alice/balance"), []byte("1000")); err != nil {
+            return err
+        }
+        if err := txn.Put([]byte("accounts/bob/balance"), []byte("500")); err != nil {
+            return err
+        }
+        return nil
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // Simulate a transfer
+    err = db.WithTransaction(func(txn *sochdb.Transaction) error {
+        // Read current balances
+        aliceData, err := txn.Get([]byte("accounts/alice/balance"))
+        if err != nil {
+            return err
+        }
+        bobData, err := txn.Get([]byte("accounts/bob/balance"))
+        if err != nil {
+            return err
+        }
+
+        aliceBalance, _ := strconv.Atoi(string(aliceData))
+        bobBalance, _ := strconv.Atoi(string(bobData))
+
+        transferAmount := 250
+
+        // Update balances atomically
+        if err := txn.Put([]byte("accounts/alice/balance"), 
+            []byte(strconv.Itoa(aliceBalance-transferAmount))); err != nil {
+            return err
+        }
+        if err := txn.Put([]byte("accounts/bob/balance"), 
+            []byte(strconv.Itoa(bobBalance+transferAmount))); err != nil {
+            return err
+        }
+
+        fmt.Printf("✓ Transfer: Alice -> Bob: $%d\n", transferAmount)
+        return nil
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // Verify final balances
+    alice, _ := db.Get([]byte("accounts/alice/balance"))
+    bob, _ := db.Get([]byte("accounts/bob/balance"))
+
+    fmt.Println("\n✓ Final balances:")
+    fmt.Printf("  Alice: $%s\n", string(alice))
+    fmt.Printf("  Bob: $%s\n", string(bob))
+}
+```
+
+### Transaction Rollback
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+
+    sochdb "github.com/sochdb/sochdb-go"
+)
+
+func main() {
+    db, err := sochdb.Open("./my_db")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer db.Close()
+
+    // Transaction rollback on error
+    err = db.WithTransaction(func(txn *sochdb.Transaction) error {
+        txn.Put([]byte("accounts/alice/balance"), []byte("9999"))
+        return fmt.Errorf("simulated failure")
+    })
+    if err != nil {
+        fmt.Printf("✓ Transaction rolled back: %v\n", err)
+    }
+
+    // Verify balance unchanged after rollback
+    aliceAfter, _ := db.Get([]byte("accounts/alice/balance"))
+    fmt.Printf("✓ Alice's balance after rollback: $%s\n", string(aliceAfter))
+}
+```
+
+## Vector Search
+
+### Creating a Vector Index
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+
+    sochdb "github.com/sochdb/sochdb-go"
+)
+
+func main() {
+    // Configuration for the vector index
+    config := sochdb.VectorIndexConfig{
+        Dimension:      128,                           // Embedding dimension
+        Metric:         sochdb.DistanceMetricCosine,   // Cosine similarity
+        M:              16,                            // HNSW connections per node
+        EfConstruction: 100,                           // Construction quality factor
+    }
+
+    index, err := sochdb.NewVectorIndex("./vector_index", config)
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Println("✓ Vector index created")
+}
+```
+
+### Bulk Building Vectors
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+
+    sochdb "github.com/sochdb/sochdb-go"
+)
+
+func main() {
+    config := sochdb.VectorIndexConfig{
+        Dimension:      128,
+        Metric:         sochdb.DistanceMetricCosine,
+        M:              16,
+        EfConstruction: 100,
+    }
+
+    index, err := sochdb.NewVectorIndex("./vector_index", config)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // Generate sample embeddings (in practice, use a real embedding model)
+    vectors := make([][]float32, 100)
+    labels := make([]string, 100)
+
+    for i := 0; i < 100; i++ {
+        // Create a simple pattern-based embedding for demo
+        vec := make([]float32, 128)
+        for j := 0; j < 128; j++ {
+            vec[j] = float32((i*j)%256) / 255.0
+        }
+        vectors[i] = vec
+        labels[i] = fmt.Sprintf("document_%d", i)
+    }
+
+    // Bulk build the index
+    err = index.BulkBuild(vectors, labels)
+    if err != nil {
+        log.Fatal(err)
+    }
+    fmt.Printf("✓ Indexed %d vectors\n", len(vectors))
+}
+```
+
+### Searching Vectors
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+
+    sochdb "github.com/sochdb/sochdb-go"
+)
+
+func main() {
+    // ... create and populate index ...
+
+    // Create a query vector (similar to document_42)
+    query := make([]float32, 128)
+    for j := 0; j < 128; j++ {
+        query[j] = float32((42*j)%256) / 255.0
+    }
+
+    // Search for nearest neighbors
+    results, err := index.Query(query, 5) // k=5
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    fmt.Println("\n✓ Top 5 nearest neighbors:")
+    for i, result := range results {
+        label := "<no label>"
+        if result.Label != "" {
+            label = result.Label
+        }
+        fmt.Printf("  %d. %s (distance: %.4f)\n", i+1, label, result.Distance)
+    }
+}
+```
+
+### Distance Utilities
+
+```go
+package main
+
+import (
+    "fmt"
+
+    sochdb "github.com/sochdb/sochdb-go"
+)
+
+func main() {
+    // Distance utility functions
+    a := []float32{1.0, 0.0, 0.0}
+    b := []float32{0.707, 0.707, 0.0}
+
+    cosineDist := sochdb.ComputeCosineDistance(a, b)
+    euclideanDist := sochdb.ComputeEuclideanDistance(a, b)
+
+    fmt.Println("✓ Distance calculations:")
+    fmt.Printf("  Cosine distance: %.4f\n", cosineDist)
+    fmt.Printf("  Euclidean distance: %.4f\n", euclideanDist)
+
+    // Normalize a vector
+    v := []float32{3.0, 4.0}
+    normalized := sochdb.NormalizeVector(v)
+    fmt.Printf("  Normalized [3, 4]: [%.2f, %.2f]\n", normalized[0], normalized[1])
+}
+```
+
+## Graph Overlay
+
+Build lightweight graph structures for agent memory:
+
+```go
+package main
+
+import (
+    "fmt"
+
+    sochdb "github.com/sochdb/sochdb-go"
+)
+
+func main() {
+    db, _ := sochdb.Open("./my_db")
+    defer db.Close()
+    
+    graph := sochdb.NewGraphOverlay(db, "agent_memory")
+    
+    // Build agent action graph
+    graph.AddNode("action_1", map[string]interface{}{
+        "type": "search", "query": "best restaurants",
+    })
+    graph.AddNode("action_2", map[string]interface{}{
+        "type": "filter", "criteria": "italian",
+    })
+    
+    graph.AddEdge("action_1", "action_2", map[string]interface{}{
+        "relationship": "feeds_into",
+    })
+    
+    // Find dependencies (DFS)
+    deps := graph.DFS("action_1", 10)
+    fmt.Printf("Action dependencies: %v\n", deps)
+}
+```
+
+## Namespace Isolation
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+
+    sochdb "github.com/sochdb/sochdb-go"
+)
+
+func main() {
+    db, err := sochdb.Open("./my_db")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer db.Close()
+
+    // Create namespace for tenant isolation
+    namespace := db.Namespace("tenant_acme")
+
+    // All operations are scoped to this namespace
+    err = namespace.Put([]byte("config/api_key"), []byte("secret123"))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    apiKey, err := namespace.Get([]byte("config/api_key"))
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    fmt.Printf("API Key: %s\n", string(apiKey))
+}
+```
+
+## SDK Features
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Basic KV | ✅ | Put, Get, Delete, Query |
+| Transactions | ✅ | ACID with MVCC |
+| Vector Search | ✅ | HNSW indexing |
+| Namespace Isolation | ✅ | Multi-tenant support |
+| Graph Overlay | ✅ | Agent memory tracking |
+| Idiomatic Go | ✅ | Error handling, defer cleanup |
+| CGO Support | ✅ | Embedded mode |
+
+## External Resources
+
+<CardGroup cols={2}>
+
+<Card title="Go SDK Repository" icon="github" href="https://github.com/sochdb/sochdb-go">
+  Source code and development
+</Card>
+
+<Card title="Go Examples" icon="code" href="https://github.com/sochdb/sochdb-golang-examples">
+  Complete working examples
+</Card>
+
+</CardGroup>
+
+## Performance Tips
+
+<AccordionGroup>
+
+<Accordion title="Use defer for cleanup">
+  Always use `defer db.Close()` immediately after opening a database to ensure proper cleanup:
+  ```go
+  db, err := sochdb.Open("./my_db")
+  if err != nil {
+      log.Fatal(err)
+  }
+  defer db.Close()
+  ```
+</Accordion>
+
+<Accordion title="Batch operations in transactions">
+  Use `WithTransaction` for multiple related operations to ensure atomicity and reduce overhead:
+  ```go
+  err = db.WithTransaction(func(txn *sochdb.Transaction) error {
+      // Multiple operations here
+      return nil
+  })
+  ```
+</Accordion>
+
+<Accordion title="Use bulk build for vectors">
+  Use `BulkBuild()` instead of individual `Add()` calls when inserting many vectors to reduce overhead.
+</Accordion>
+
+<Accordion title="Handle errors properly">
+  Always check errors returned from SochDB operations. Use `sochdb.ErrNotFound` to distinguish missing keys from other errors.
+</Accordion>
+
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+
+<Card title="Vector Search Guide" icon="magnifying-glass" href="/features/vector-search">
+  Deep dive into HNSW configuration
+</Card>
+
+<Card title="Transaction Guide" icon="lock" href="/features/transactions">
+  Learn about isolation levels
+</Card>
+
+</CardGroup>

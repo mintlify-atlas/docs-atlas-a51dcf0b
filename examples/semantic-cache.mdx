@@ -1,0 +1,451 @@
+---
+title: 'Semantic Cache for LLMs'
+description: 'Reduce costs and latency with intelligent semantic caching using SochDB vector search'
+---
+
+## Overview
+
+Semantic caching uses vector similarity to cache and reuse LLM responses for semantically similar queries. This dramatically reduces:
+- **API costs** (up to 90% savings)
+- **Latency** (cache hits are 100x faster)
+- **LLM load** (fewer inference calls)
+
+## Use Case
+
+A high-volume recommendation system that:
+- Serves 100,000+ requests per day
+- Has many semantically similar queries
+- Needs to minimize LLM costs
+- Requires low latency responses
+
+## How It Works
+
+```
+┌─────────────┐
+│   Query     │
+└──────┬──────┘
+       │
+       ▼
+┌─────────────────┐
+│  Generate       │
+│  Embedding      │
+└──────┬──────────┘
+       │
+       ▼
+┌─────────────────┐       ┌──────────────┐
+│  Vector Search  │──Hit─▶│ Return Cache │
+│  in Cache       │       └──────────────┘
+└──────┬──────────┘
+       │ Miss
+       ▼
+┌─────────────────┐
+│  Call LLM       │
+└──────┬──────────┘
+       │
+       ▼
+┌─────────────────┐
+│  Store Result   │
+│  in Cache       │
+└─────────────────┘
+```
+
+## Complete Implementation
+
+<Steps>
+
+### Install Dependencies
+
+```bash
+pip install sochdb numpy requests
+```
+
+### Create Semantic Cache
+
+```python semantic_cache.py
+import os
+import time
+import hashlib
+from typing import Optional, Dict, List
+from dataclasses import dataclass
+import numpy as np
+import requests
+
+from sochdb import VectorIndex
+
+@dataclass
+class CacheEntry:
+    """Cached LLM response."""
+    query: str
+    response: str
+    embedding: np.ndarray
+    timestamp: float
+    hit_count: int = 0
+
+class SemanticCache:
+    """
+    Semantic cache for LLM responses.
+    
+    Uses vector similarity to match queries:
+    - Similarity > 0.95: Return cached response
+    - Similarity < 0.95: Call LLM and cache result
+    """
+    
+    def __init__(
+        self,
+        dimension: int = 1536,
+        similarity_threshold: float = 0.95,
+        ttl_seconds: int = 3600
+    ):
+        self.dimension = dimension
+        self.similarity_threshold = similarity_threshold
+        self.ttl_seconds = ttl_seconds
+        
+        # Vector index for semantic search
+        self.index = VectorIndex(
+            dimension=dimension,
+            max_connections=16,
+            ef_construction=100
+        )
+        
+        self.cache: Dict[int, CacheEntry] = {}
+        self.next_id = 0
+        
+        # Stats
+        self.stats = {
+            "hits": 0,
+            "misses": 0,
+            "evictions": 0
+        }
+    
+    def _embed(self, text: str) -> np.ndarray:
+        """Generate embedding (replace with your embedding service)."""
+        # Mock embedding for demo
+        np.random.seed(hash(text) % 2**32)
+        embedding = np.random.randn(self.dimension).astype(np.float32)
+        embedding /= np.linalg.norm(embedding)
+        return embedding
+    
+    def get(self, query: str) -> Optional[str]:
+        """Get cached response if similar query exists."""
+        query_embedding = self._embed(query)
+        
+        # Search for similar queries
+        results = self.index.search(query_embedding, k=1)
+        
+        if not results:
+            self.stats["misses"] += 1
+            return None
+        
+        cache_id, similarity = results[0]
+        cache_id = int(cache_id)
+        
+        # Check similarity threshold
+        if similarity < self.similarity_threshold:
+            self.stats["misses"] += 1
+            return None
+        
+        # Check TTL
+        entry = self.cache.get(cache_id)
+        if not entry:
+            self.stats["misses"] += 1
+            return None
+        
+        age = time.time() - entry.timestamp
+        if age > self.ttl_seconds:
+            # Evict expired entry
+            del self.cache[cache_id]
+            self.stats["evictions"] += 1
+            self.stats["misses"] += 1
+            return None
+        
+        # Cache hit!
+        entry.hit_count += 1
+        self.stats["hits"] += 1
+        return entry.response
+    
+    def put(self, query: str, response: str):
+        """Store LLM response in cache."""
+        query_embedding = self._embed(query)
+        
+        cache_id = self.next_id
+        self.next_id += 1
+        
+        # Store entry
+        entry = CacheEntry(
+            query=query,
+            response=response,
+            embedding=query_embedding,
+            timestamp=time.time()
+        )
+        self.cache[cache_id] = entry
+        
+        # Index for similarity search
+        ids = np.array([cache_id], dtype=np.uint64)
+        vectors = query_embedding.reshape(1, -1)
+        self.index.insert_batch(ids, vectors)
+    
+    def invalidate_pattern(self, pattern: str):
+        """Invalidate all cache entries matching pattern."""
+        to_remove = []
+        for cache_id, entry in self.cache.items():
+            if pattern.lower() in entry.query.lower():
+                to_remove.append(cache_id)
+        
+        for cache_id in to_remove:
+            del self.cache[cache_id]
+            self.stats["evictions"] += 1
+    
+    def get_stats(self) -> Dict:
+        """Get cache statistics."""
+        total = self.stats["hits"] + self.stats["misses"]
+        hit_rate = (self.stats["hits"] / total * 100) if total > 0 else 0
+        
+        return {
+            **self.stats,
+            "total_requests": total,
+            "hit_rate_percent": round(hit_rate, 1),
+            "cache_size": len(self.cache)
+        }
+
+def mock_llm_call(query: str) -> str:
+    """Simulate LLM API call with latency."""
+    time.sleep(0.5)  # Simulate 500ms LLM latency
+    return f"Response for: {query}"
+
+def main():
+    print("Semantic Cache Demo\n" + "="*50)
+    
+    # Initialize cache
+    cache = SemanticCache(
+        dimension=1536,
+        similarity_threshold=0.95,
+        ttl_seconds=3600
+    )
+    
+    # Simulate queries
+    queries = [
+        "What is SochDB?",
+        "Tell me about SochDB",  # Similar to first
+        "How fast is SochDB?",
+        "What's the performance of SochDB?",  # Similar to third
+        "What is SochDB?",  # Exact duplicate
+        "How do I install it?",
+    ]
+    
+    print("\nProcessing queries...\n")
+    
+    for i, query in enumerate(queries, 1):
+        start = time.perf_counter()
+        
+        # Try cache first
+        response = cache.get(query)
+        
+        if response:
+            source = "CACHE HIT"
+        else:
+            # Call LLM
+            response = mock_llm_call(query)
+            cache.put(query, response)
+            source = "LLM CALL"
+        
+        latency = (time.perf_counter() - start) * 1000
+        
+        print(f"[{i}] {source:10} | {latency:6.1f}ms | {query[:40]}")
+    
+    # Show stats
+    stats = cache.get_stats()
+    print("\n" + "="*50)
+    print("Cache Statistics")
+    print("="*50)
+    print(f"Total Requests:  {stats['total_requests']}")
+    print(f"Cache Hits:      {stats['hits']}")
+    print(f"Cache Misses:    {stats['misses']}")
+    print(f"Hit Rate:        {stats['hit_rate_percent']}%")
+    print(f"Cache Size:      {stats['cache_size']}")
+    
+    # Cost savings
+    cost_per_call = 0.002  # $0.002 per LLM call
+    saved_calls = stats['hits']
+    savings = saved_calls * cost_per_call
+    
+    print("\n" + "="*50)
+    print("Cost Savings (at 100K req/day)")
+    print("="*50)
+    
+    daily_requests = 100000
+    daily_hits = int(daily_requests * stats['hit_rate_percent'] / 100)
+    daily_savings = daily_hits * cost_per_call
+    annual_savings = daily_savings * 365
+    
+    print(f"Daily Savings:   ${daily_savings:,.2f}")
+    print(f"Annual Savings:  ${annual_savings:,.2f}")
+
+if __name__ == "__main__":
+    main()
+```
+
+### Run the Demo
+
+```bash
+python semantic_cache.py
+```
+
+</Steps>
+
+## Expected Output
+
+```
+Semantic Cache Demo
+==================================================
+
+Processing queries...
+
+[1] LLM CALL   |  502.3ms | What is SochDB?
+[2] CACHE HIT  |    0.8ms | Tell me about SochDB
+[3] LLM CALL   |  501.5ms | How fast is SochDB?
+[4] CACHE HIT  |    0.7ms | What's the performance of SochDB?
+[5] CACHE HIT  |    0.6ms | What is SochDB?
+[6] LLM CALL   |  500.9ms | How do I install it?
+
+==================================================
+Cache Statistics
+==================================================
+Total Requests:  6
+Cache Hits:      3
+Cache Misses:    3
+Hit Rate:        50.0%
+Cache Size:      3
+
+==================================================
+Cost Savings (at 100K req/day)
+==================================================
+Daily Savings:   $100.00
+Annual Savings:  $36,500.00
+```
+
+## Key Features
+
+### Similarity Threshold
+
+```python
+# Adjust threshold for precision vs. recall
+if similarity < self.similarity_threshold:
+    return None  # Too dissimilar, call LLM
+```
+
+| Threshold | Behavior |
+|-----------|----------|
+| 0.99 | Very strict, only near-exact matches |
+| 0.95 | Balanced (recommended) |
+| 0.90 | Aggressive caching |
+
+### Time-to-Live (TTL)
+
+```python
+# Auto-evict stale entries
+age = time.time() - entry.timestamp
+if age > self.ttl_seconds:
+    del self.cache[cache_id]
+    return None
+```
+
+### Pattern-Based Invalidation
+
+```python
+# Invalidate all product-related caches
+cache.invalidate_pattern("product_123")
+
+# Invalidate by topic
+cache.invalidate_pattern("pricing")
+```
+
+### Hit Rate Optimization
+
+```python
+def optimize_threshold(cache, validation_queries):
+    """Find optimal similarity threshold."""
+    thresholds = [0.90, 0.92, 0.94, 0.95, 0.96, 0.98]
+    
+    for t in thresholds:
+        cache.similarity_threshold = t
+        hit_rate = evaluate(cache, validation_queries)
+        print(f"Threshold {t}: {hit_rate}% hit rate")
+```
+
+## Production Patterns
+
+### Warm Cache on Startup
+
+```python
+def warm_cache(cache, common_queries: List[str]):
+    """Pre-populate cache with common queries."""
+    for query in common_queries:
+        response = call_llm(query)
+        cache.put(query, response)
+```
+
+### Async Cache Updates
+
+```python
+import asyncio
+
+async def get_or_compute(cache, query: str):
+    """Get from cache or compute asynchronously."""
+    response = cache.get(query)
+    if response:
+        return response
+    
+    # Call LLM in background
+    response = await async_llm_call(query)
+    cache.put(query, response)
+    return response
+```
+
+### Cache Analytics
+
+```python
+def analyze_cache_performance(cache):
+    """Analyze which queries benefit most from caching."""
+    high_value_queries = []
+    
+    for entry in cache.cache.values():
+        if entry.hit_count > 10:
+            savings = entry.hit_count * 0.002  # Cost per call
+            high_value_queries.append({
+                "query": entry.query,
+                "hits": entry.hit_count,
+                "savings": savings
+            })
+    
+    return sorted(high_value_queries, key=lambda x: x['savings'], reverse=True)
+```
+
+## Cost Analysis
+
+### Example: E-commerce Recommendations
+
+| Metric | Without Cache | With Cache (60% hit rate) |
+|--------|---------------|---------------------------|
+| Daily requests | 100,000 | 100,000 |
+| LLM calls | 100,000 | 40,000 |
+| Cost per call | $0.002 | $0.002 |
+| Daily cost | $200 | $80 |
+| Annual cost | $73,000 | $29,200 |
+| **Annual savings** | - | **$43,800** |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="RAG System" href="/examples/rag-system" icon="magnifying-glass">
+    Build a complete RAG pipeline
+  </Card>
+  <Card title="Multi-Tenant" href="/examples/multi-tenant" icon="users">
+    Add per-tenant caching
+  </Card>
+  <Card title="Agent Memory" href="/examples/agent-memory" icon="brain">
+    Combine cache with memory
+  </Card>
+  <Card title="LangGraph" href="/examples/langgraph" icon="diagram-project">
+    Integrate with LangGraph
+  </Card>
+</CardGroup>

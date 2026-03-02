@@ -1,0 +1,658 @@
+---
+title: Docker Deployment
+description: Deploy SochDB as a production-ready gRPC server with monitoring
+---
+
+Deploy SochDB as a containerized gRPC server with high availability, load balancing, and comprehensive monitoring.
+
+## Overview
+
+**Docker Hub Image:** [`sushanth53/sochdb`](https://hub.docker.com/r/sushanth53/sochdb)
+
+```bash
+# Pull and run (quickest way to get started)
+docker pull sushanth53/sochdb:latest
+docker run -d -p 50051:50051 sushanth53/sochdb:latest
+```
+
+### Features
+
+- ✅ Production-ready image (159MB, 34MB compressed)
+- ✅ High availability setup with Traefik load balancer
+- ✅ Prometheus + Grafana monitoring stack
+- ✅ gRPC-Web support via Envoy proxy
+- ✅ Comprehensive health checks
+- ✅ Non-root container for security
+
+### Performance Metrics
+
+**Tested on Apple M-series:**
+
+| Metric | Single-threaded | Concurrent (10 threads) |
+|--------|----------------|-------------------------|
+| Throughput | ~2K ops/sec | ~10.5K ops/sec |
+| P99 Latency | {"<"}2.2ms | {"<"}2.2ms |
+| P95 Latency | {"<"}1.8ms | {"<"}1.8ms |
+
+## Quick Start
+
+### Using Docker Run
+
+<Steps>
+
+<Step title="Pull the image">
+```bash
+docker pull sushanth53/sochdb:latest
+```
+</Step>
+
+<Step title="Run the container">
+```bash
+docker run -d \
+  --name sochdb \
+  -p 50051:50051 \
+  -v sochdb-data:/var/lib/sochdb \
+  sushanth53/sochdb:latest
+```
+</Step>
+
+<Step title="Verify it's running">
+```bash
+docker logs sochdb
+# Should see: "SochDB gRPC server listening on 0.0.0.0:50051"
+```
+</Step>
+
+</Steps>
+
+### Using Docker Compose (Recommended)
+
+<Steps>
+
+<Step title="Create docker-compose.yml">
+```yaml docker-compose.yml
+services:
+  sochdb:
+    image: sushanth53/sochdb:latest
+    container_name: sochdb-grpc
+    restart: unless-stopped
+    ports:
+      - "50051:50051"
+    environment:
+      - RUST_LOG=info
+      - SOCHDB_DATA_DIR=/var/lib/sochdb
+    volumes:
+      - sochdb-data:/var/lib/sochdb
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr=:50051"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+volumes:
+  sochdb-data:
+    driver: local
+```
+</Step>
+
+<Step title="Start the service">
+```bash
+docker compose up -d
+```
+</Step>
+
+<Step title="View logs">
+```bash
+docker compose logs -f sochdb
+```
+</Step>
+
+</Steps>
+
+## Configuration
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RUST_LOG` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
+| `SOCHDB_DATA_DIR` | `/var/lib/sochdb` | Data directory inside container |
+| `SOCHDB_TLS_CERT` | — | Path to TLS certificate |
+| `SOCHDB_TLS_KEY` | — | Path to TLS private key |
+
+### Command Line Options
+
+```bash
+docker run sushanth53/sochdb:latest --help
+
+# Options:
+#   --host <HOST>    Host address to bind to [default: 0.0.0.0]
+#   --port <PORT>    Port to listen on [default: 50051]
+#   --debug          Enable debug logging
+```
+
+### Custom Configuration
+
+```bash
+# Run with custom host and port
+docker run -d \
+  --name sochdb \
+  -p 9090:9090 \
+  sushanth53/sochdb:latest \
+  --host 0.0.0.0 --port 9090
+```
+
+## Deployment Profiles
+
+The included `docker-compose.yml` supports multiple profiles for different deployment scenarios.
+
+### Development Mode
+
+Enables debug logging and mounts local directory:
+
+```bash
+docker compose --profile dev up -d
+```
+
+```yaml
+sochdb-dev:
+  image: sushanth53/sochdb:latest
+  profiles:
+    - dev
+  ports:
+    - "50052:50051"
+  environment:
+    - RUST_LOG=debug
+  volumes:
+    - ./data:/var/lib/sochdb  # Local directory mount
+```
+
+### With gRPC-Web Support
+
+Adds Envoy proxy for browser-based gRPC clients:
+
+```bash
+docker compose --profile web up -d
+```
+
+Access endpoints:
+- **gRPC-Web**: `http://localhost:8080`
+- **Envoy Admin**: `http://localhost:9901`
+
+<CodeGroup>
+
+```javascript Browser Client
+import { SochDBClient } from '@sochdb/client-web';
+
+// Connect via Envoy proxy
+const client = new SochDBClient('http://localhost:8080');
+
+// Use the client
+await client.put('users/alice', { name: 'Alice Smith' });
+const user = await client.get('users/alice');
+```
+
+</CodeGroup>
+
+### With Monitoring Stack
+
+Launches Prometheus + Grafana for metrics visualization:
+
+```bash
+docker compose --profile monitoring up -d
+```
+
+Access dashboards:
+- **Prometheus**: `http://localhost:9090`
+- **Grafana**: `http://localhost:3000` (admin/sochdb)
+
+### Full Stack
+
+Combine all profiles:
+
+```bash
+docker compose --profile dev --profile web --profile monitoring up -d
+```
+
+## Production Deployment
+
+### High Availability Setup
+
+Use the production compose file for HA deployment with 3 replicas:
+
+<Steps>
+
+<Step title="Set environment variables">
+```bash
+export DOMAIN=sochdb.example.com
+export ACME_EMAIL=admin@example.com
+export GRAFANA_PASSWORD=secure-password
+export SOCHDB_VERSION=latest
+```
+</Step>
+
+<Step title="Deploy with production config">
+```bash
+docker compose -f docker-compose.production.yml up -d
+```
+</Step>
+
+</Steps>
+
+**Production features:**
+
+- **3 replicas** with automatic failover
+- **Traefik load balancer** with health checks
+- **TLS termination** with Let's Encrypt
+- **Rolling updates** with zero downtime
+- **Prometheus metrics** with 30-day retention
+- **Grafana dashboards** with TLS
+
+### Production Compose Configuration
+
+```yaml docker-compose.production.yml
+services:
+  traefik:
+    image: traefik:v3.0
+    restart: always
+    command:
+      - "--providers.docker=true"
+      - "--entrypoints.grpc.address=:50051"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
+      - "--metrics.prometheus=true"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "50051:50051"
+
+  sochdb:
+    image: sushanth53/sochdb:${SOCHDB_VERSION:-latest}
+    restart: always
+    deploy:
+      replicas: 3
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          cpus: '1'
+          memory: 2G
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first  # Zero downtime
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr=:50051"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+```
+
+### TLS Configuration
+
+Enable TLS for secure connections:
+
+```bash
+# Mount certificates
+docker run -d \
+  --name sochdb \
+  -p 50051:50051 \
+  -v ./certs:/etc/sochdb/certs:ro \
+  -e SOCHDB_TLS_CERT=/etc/sochdb/certs/server.crt \
+  -e SOCHDB_TLS_KEY=/etc/sochdb/certs/server.key \
+  sushanth53/sochdb:latest
+```
+
+<Info>
+  For production, use Traefik (included in `docker-compose.production.yml`) for automatic Let's Encrypt certificates.
+</Info>
+
+## Monitoring
+
+### Prometheus Metrics
+
+The gRPC server exposes metrics at `:9100/metrics`:
+
+```bash
+curl http://localhost:9100/metrics
+```
+
+**Key metrics:**
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `sochdb_requests_total` | Counter | Total gRPC requests by method |
+| `sochdb_request_duration_seconds` | Histogram | Request latency distribution |
+| `sochdb_active_connections` | Gauge | Active client connections |
+| `sochdb_vector_operations_total` | Counter | Vector index operations |
+| `sochdb_memory_usage_bytes` | Gauge | Memory usage |
+| `sochdb_disk_usage_bytes` | Gauge | Disk space used |
+
+### Prometheus Configuration
+
+```yaml prometheus.yml
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # SochDB gRPC Server metrics
+  - job_name: 'sochdb'
+    static_configs:
+      - targets: ['sochdb:9100']
+    metrics_path: /metrics
+    scrape_interval: 10s
+
+  # Docker container metrics (via cAdvisor)
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+    scrape_interval: 30s
+
+  # Traefik metrics (production)
+  - job_name: 'traefik'
+    static_configs:
+      - targets: ['traefik:8082']
+```
+
+### Grafana Dashboards
+
+Pre-configured dashboards are included in the monitoring profile:
+
+- **SochDB Overview**: Request rates, latencies, errors
+- **Resource Usage**: CPU, memory, disk I/O
+- **Vector Operations**: HNSW index performance
+- **Client Connections**: Active connections, connection rate
+
+```bash
+# Access Grafana
+open http://localhost:3000
+# Login: admin / sochdb (change in production)
+```
+
+## Client Connections
+
+### Python SDK
+
+```python
+from sochdb import SochDBClient
+
+# Connect to Docker container
+client = SochDBClient("localhost:50051")
+
+# Use the client
+client.put_kv("users/alice", b"Alice Smith")
+value = client.get_kv("users/alice")
+print(value.decode())
+
+client.close()
+```
+
+### Go Client
+
+```go
+import "github.com/sochdb/sochdb-go"
+
+client, err := sochdb.NewClient("localhost:50051")
+if err != nil {
+    log.Fatal(err)
+}
+defer client.Close()
+
+// Use the client
+err = client.Put([]byte("users/alice"), []byte("Alice Smith"))
+value, err := client.Get([]byte("users/alice"))
+```
+
+### Node.js Client
+
+```typescript
+import { SochDBClient } from '@sochdb/sochdb';
+
+const client = new SochDBClient('localhost:50051');
+
+await client.put('users/alice', 'Alice Smith');
+const value = await client.get('users/alice');
+console.log(value);
+
+await client.close();
+```
+
+## Health Checks
+
+### gRPC Health Check
+
+```bash
+# Install grpc_health_probe
+go install github.com/grpc-ecosystem/grpc-health-probe@latest
+
+# Check health
+grpc_health_probe -addr=localhost:50051
+```
+
+### HTTP Health Check (via Envoy)
+
+```bash
+# With web profile enabled
+curl http://localhost:9901/ready
+```
+
+### Docker Health Status
+
+```bash
+# View health status
+docker ps --filter name=sochdb --format "table {{.Names}}\t{{.Status}}"
+
+# Example output:
+# sochdb-grpc   Up 2 hours (healthy)
+```
+
+## Data Management
+
+### Volume Mounts
+
+| Mount | Purpose |
+|-------|----------|
+| `/var/lib/sochdb` | Persistent data storage |
+| `/etc/sochdb/config.toml` | Configuration file (optional) |
+| `/etc/sochdb/certs` | TLS certificates (optional) |
+
+### Backup Data
+
+```bash
+# Create backup
+docker run --rm \
+  -v sochdb-data:/data:ro \
+  -v $(pwd):/backup \
+  alpine tar czf /backup/sochdb-backup-$(date +%Y%m%d).tar.gz -C /data .
+
+# Restore backup
+docker run --rm \
+  -v sochdb-data:/data \
+  -v $(pwd):/backup:ro \
+  alpine tar xzf /backup/sochdb-backup-20260302.tar.gz -C /data
+```
+
+### Data Migration
+
+```bash
+# Export data from old container
+docker exec sochdb sochdb-export --output /var/lib/sochdb/export.json
+
+# Copy to host
+docker cp sochdb:/var/lib/sochdb/export.json ./
+
+# Import to new container
+docker cp export.json sochdb-new:/var/lib/sochdb/
+docker exec sochdb-new sochdb-import --input /var/lib/sochdb/export.json
+```
+
+## Security
+
+### Non-Root User
+
+The container runs as non-root user `sochdb` (UID 1000):
+
+```dockerfile
+# From Dockerfile
+RUN useradd -r -s /bin/false sochdb
+USER sochdb
+```
+
+### Network Isolation
+
+```bash
+# Create isolated network
+docker network create --driver bridge sochdb-isolated
+
+# Run with isolated network
+docker run -d \
+  --network sochdb-isolated \
+  --name sochdb \
+  sushanth53/sochdb:latest
+```
+
+### Resource Limits
+
+```bash
+# Set CPU and memory limits
+docker run -d \
+  --name sochdb \
+  --cpus="2.0" \
+  --memory="4g" \
+  --memory-swap="4g" \
+  sushanth53/sochdb:latest
+```
+
+## Troubleshooting
+
+### Container Won't Start
+
+<Steps>
+
+<Step title="Check logs">
+```bash
+docker logs sochdb
+```
+</Step>
+
+<Step title="Check port conflicts">
+```bash
+lsof -i :50051
+# Kill conflicting process or change port
+```
+</Step>
+
+<Step title="Check disk space">
+```bash
+df -h
+docker system df
+```
+</Step>
+
+</Steps>
+
+### Connection Refused
+
+```bash
+# Ensure container is running
+docker ps | grep sochdb
+
+# Test connectivity
+grpc_health_probe -addr=localhost:50051
+
+# Check firewall rules
+sudo ufw status
+```
+
+### Out of Memory
+
+```bash
+# Increase memory limit
+docker update --memory=8g --memory-swap=8g sochdb
+
+# Or restart with higher limit
+docker stop sochdb
+docker run -d --name sochdb --memory=8g sushanth53/sochdb:latest
+```
+
+### Performance Issues
+
+<CodeGroup>
+
+```bash File Descriptors
+# Increase file descriptor limit
+docker run -d \
+  --ulimit nofile=65536:65536 \
+  sushanth53/sochdb:latest
+```
+
+```bash CPU Pinning
+# Pin to specific cores
+docker run -d \
+  --cpuset-cpus="0-3" \
+  sushanth53/sochdb:latest
+```
+
+</CodeGroup>
+
+### Debug Mode
+
+```bash
+# Run with debug logging
+docker run -d \
+  -e RUST_LOG=debug \
+  sushanth53/sochdb:latest --debug
+
+# Follow logs in real-time
+docker logs -f sochdb
+```
+
+<Warning>
+  Debug logging can significantly increase disk usage. Use only for troubleshooting.
+</Warning>
+
+## Building from Source
+
+If you want to build the image yourself:
+
+```bash
+# Clone the repository
+git clone https://github.com/sochdb/sochdb.git
+cd sochdb/docker
+
+# Build the image
+docker build -t my-sochdb:latest -f Dockerfile ..
+
+# Run your custom build
+docker run -d -p 50051:50051 my-sochdb:latest
+```
+
+### Slim Image (Alpine-based)
+
+```bash
+# Build minimal image (~25MB)
+docker build -f Dockerfile.slim -t my-sochdb:slim ..
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="MCP Server" icon="plug" href="/deployment/mcp-server">
+    Connect to AI assistants via Model Context Protocol
+  </Card>
+  <Card title="Embedded Deployment" icon="cube" href="/deployment/embedded">
+    Run SochDB in-process for desktop/mobile apps
+  </Card>
+</CardGroup>

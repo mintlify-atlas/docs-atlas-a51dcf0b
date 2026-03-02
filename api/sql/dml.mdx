@@ -1,0 +1,489 @@
+---
+title: "DML (Data Manipulation Language)"
+description: "INSERT, UPDATE, DELETE, and transaction control in SochDB"
+---
+
+SochDB provides full SQL-92 compliant DML (Data Manipulation Language) for modifying data. All DML statements support parameterized queries and run within ACID transactions.
+
+## INSERT
+
+Insert new rows into a table.
+
+### Basic Syntax
+
+```sql
+INSERT INTO users (id, name, email) VALUES (1, 'Alice', 'alice@example.com');
+```
+
+### Insert with All Columns
+
+```sql
+INSERT INTO users VALUES (1, 'Alice', 'alice@example.com', 30, 1);
+```
+
+### Insert Multiple Rows
+
+```sql
+INSERT INTO users (id, name, email) VALUES 
+  (1, 'Alice', 'alice@example.com'),
+  (2, 'Bob', 'bob@example.com'),
+  (3, 'Charlie', 'charlie@example.com');
+```
+
+### Insert with NULL Values
+
+```sql
+INSERT INTO users (id, name, email) VALUES (1, 'Alice', NULL);
+```
+
+### Insert with Expressions
+
+```sql
+INSERT INTO orders (id, user_id, total, tax)
+VALUES (1, 42, 100.00, 100.00 * 0.08);
+```
+
+### Insert from SELECT
+
+```sql
+INSERT INTO archived_users (id, name, email)
+SELECT id, name, email FROM users WHERE active = 0;
+```
+
+### Insert DEFAULT VALUES
+
+```sql
+INSERT INTO logs DEFAULT VALUES;
+```
+
+## Conflict Handling (Upsert)
+
+SochDB normalizes dialect-specific conflict handling to a unified AST representation.
+
+### PostgreSQL Style
+
+#### Do Nothing on Conflict
+
+```sql
+INSERT INTO users (id, name, email) VALUES (1, 'Alice', 'alice@example.com')
+ON CONFLICT DO NOTHING;
+```
+
+#### Update on Conflict
+
+```sql
+INSERT INTO users (id, name, email) VALUES (1, 'Alice', 'alice@example.com')
+ON CONFLICT (id) DO UPDATE SET 
+  name = 'Alice Updated',
+  email = 'alice.new@example.com';
+```
+
+### MySQL Style
+
+#### Insert Ignore
+
+```sql
+INSERT IGNORE INTO users (id, name, email) VALUES (1, 'Alice', 'alice@example.com');
+```
+
+**Equivalent to:** `ON CONFLICT DO NOTHING`
+
+#### On Duplicate Key Update
+
+```sql
+INSERT INTO users (id, name, email) VALUES (1, 'Alice', 'alice@example.com')
+ON DUPLICATE KEY UPDATE name = 'Bob', email = 'bob@example.com';
+```
+
+### SQLite Style
+
+#### Insert or Ignore
+
+```sql
+INSERT OR IGNORE INTO users (id, name, email) VALUES (1, 'Alice', 'alice@example.com');
+```
+
+#### Insert or Replace
+
+```sql
+INSERT OR REPLACE INTO users (id, name, email) VALUES (1, 'Alice', 'alice@example.com');
+```
+
+**Behavior:** Deletes the existing row and inserts the new one.
+
+#### Insert or Abort
+
+```sql
+INSERT OR ABORT INTO users (id, name, email) VALUES (1, 'Alice', 'alice@example.com');
+```
+
+**Behavior:** Default behavior - aborts on conflict.
+
+#### Insert or Fail
+
+```sql
+INSERT OR FAIL INTO users (id, name, email) VALUES (1, 'Alice', 'alice@example.com');
+```
+
+**Behavior:** Fails the current statement but continues with other rows in a batch.
+
+## UPDATE
+
+Modify existing rows in a table.
+
+### Basic Syntax
+
+```sql
+UPDATE users SET age = 31 WHERE id = 1;
+```
+
+### Update Multiple Columns
+
+```sql
+UPDATE users SET 
+  name = 'Alicia',
+  email = 'alicia@example.com',
+  age = 31
+WHERE id = 1;
+```
+
+### Update Multiple Rows
+
+```sql
+UPDATE users SET active = 1 WHERE active = 0;
+```
+
+### Update All Rows
+
+```sql
+UPDATE users SET last_login = CURRENT_TIMESTAMP;
+```
+
+**Warning:** Updates every row in the table. Use with caution.
+
+### Update with Expressions
+
+```sql
+-- Increment age by 1
+UPDATE users SET age = age + 1 WHERE id = 1;
+
+-- Apply 10% discount
+UPDATE products SET price = price * 0.9 WHERE category = 'Electronics';
+
+-- Concatenate strings
+UPDATE users SET full_name = first_name || ' ' || last_name;
+```
+
+### Update with Subquery
+
+```sql
+UPDATE orders SET user_name = (
+  SELECT name FROM users WHERE users.id = orders.user_id
+);
+```
+
+### Conditional Update (CASE)
+
+```sql
+UPDATE employees SET salary = CASE
+  WHEN department = 'Engineering' THEN salary * 1.10
+  WHEN department = 'Sales' THEN salary * 1.15
+  ELSE salary * 1.05
+END;
+```
+
+## DELETE
+
+Remove rows from a table.
+
+### Basic Syntax
+
+```sql
+DELETE FROM users WHERE id = 1;
+```
+
+### Delete Multiple Rows
+
+```sql
+DELETE FROM users WHERE active = 0;
+```
+
+### Delete All Rows
+
+```sql
+DELETE FROM logs;
+```
+
+**Warning:** Deletes every row in the table. Use with caution.
+
+### Delete with Complex WHERE
+
+```sql
+DELETE FROM users WHERE age > 30 OR active = 0;
+
+DELETE FROM orders WHERE created_at < '2024-01-01' AND status = 'cancelled';
+```
+
+### Delete with Subquery
+
+```sql
+DELETE FROM orders WHERE user_id IN (
+  SELECT id FROM users WHERE active = 0
+);
+```
+
+### Delete with JOIN (PostgreSQL style)
+
+```sql
+DELETE FROM orders
+USING users
+WHERE orders.user_id = users.id AND users.active = 0;
+```
+
+## Transaction Control
+
+SochDB provides full ACID transaction support with MVCC (Multi-Version Concurrency Control).
+
+### BEGIN
+
+Start a new transaction.
+
+```sql
+BEGIN;
+```
+
+### BEGIN with Isolation Level
+
+```sql
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+
+BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED;
+
+BEGIN TRANSACTION ISOLATION LEVEL SNAPSHOT;
+```
+
+Supported isolation levels:
+- `READ UNCOMMITTED`
+- `READ COMMITTED` - Default
+- `REPEATABLE READ`
+- `SERIALIZABLE` - SSI with cycle detection
+- `SNAPSHOT` - MVCC snapshot isolation
+
+### READ ONLY Transactions
+
+```sql
+BEGIN TRANSACTION READ ONLY;
+```
+
+### COMMIT
+
+Commit the current transaction.
+
+```sql
+BEGIN;
+INSERT INTO users (id, name) VALUES (1, 'Alice');
+INSERT INTO orders (id, user_id) VALUES (1, 1);
+COMMIT;
+```
+
+**Behavior:** Makes all changes permanent. Uses WAL (Write-Ahead Logging) for durability.
+
+### ROLLBACK
+
+Rollback the current transaction.
+
+```sql
+BEGIN;
+UPDATE users SET balance = balance - 100 WHERE id = 1;
+UPDATE users SET balance = balance + 100 WHERE id = 2;
+-- Oops, something went wrong
+ROLLBACK;
+```
+
+**Behavior:** Discards all changes made in the transaction.
+
+### SAVEPOINT
+
+Create a named savepoint within a transaction.
+
+```sql
+BEGIN;
+INSERT INTO users (id, name) VALUES (1, 'Alice');
+SAVEPOINT sp1;
+INSERT INTO users (id, name) VALUES (2, 'Bob');
+ROLLBACK TO sp1;  -- Rolls back only the second INSERT
+COMMIT;  -- Commits Alice but not Bob
+```
+
+### RELEASE SAVEPOINT
+
+Remove a savepoint.
+
+```sql
+BEGIN;
+INSERT INTO users (id, name) VALUES (1, 'Alice');
+SAVEPOINT sp1;
+INSERT INTO users (id, name) VALUES (2, 'Bob');
+RELEASE sp1;  -- Remove savepoint
+COMMIT;
+```
+
+## Transaction Examples
+
+### Bank Transfer (ACID)
+
+```sql
+BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;
+
+-- Deduct from sender
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+
+-- Add to receiver
+UPDATE accounts SET balance = balance + 100 WHERE id = 2;
+
+-- Record transaction
+INSERT INTO transactions (from_id, to_id, amount) VALUES (1, 2, 100);
+
+COMMIT;
+```
+
+### Conditional Rollback
+
+```sql
+BEGIN;
+
+UPDATE inventory SET stock = stock - 10 WHERE product_id = 123;
+
+-- Check if stock went negative
+SELECT stock FROM inventory WHERE product_id = 123;
+-- If negative, rollback
+
+ROLLBACK;  -- or COMMIT if stock is valid
+```
+
+### Bulk Operations with Savepoints
+
+```sql
+BEGIN;
+
+FOR i IN 1..1000 LOOP
+  SAVEPOINT sp;
+  
+  INSERT INTO logs (message) VALUES ('Processing row ' || i);
+  
+  -- If error, rollback to savepoint and continue
+  IF error THEN
+    ROLLBACK TO sp;
+  ELSE
+    RELEASE sp;
+  END IF;
+END LOOP;
+
+COMMIT;
+```
+
+## Parameterized Queries
+
+Use placeholders to prevent SQL injection and improve performance.
+
+### Positional Placeholders ($1, $2, ...)
+
+```sql
+INSERT INTO users (id, name, email) VALUES ($1, $2, $3);
+```
+
+### Question Mark Placeholders (?)
+
+```sql
+INSERT INTO users (id, name, email) VALUES (?, ?, ?);
+```
+
+**Note:** Question marks are automatically indexed as `$1`, `$2`, `$3`, etc.
+
+### Usage from Client
+
+```rust
+use sochdb::SochConnection;
+use sochdb_core::SochValue;
+
+let conn = SochConnection::open("./data")?;
+
+let result = conn.execute_ast_params(
+    "INSERT INTO users (id, name, email) VALUES ($1, $2, $3)",
+    &[
+        SochValue::Int(1),
+        SochValue::Text("Alice".to_string()),
+        SochValue::Text("alice@example.com".to_string()),
+    ]
+)?;
+```
+
+## ACID Guarantees
+
+| Property | Implementation |
+|----------|----------------|
+| **Atomicity** | Buffered writes with all-or-nothing commit |
+| **Consistency** | Schema validation before commit |
+| **Isolation** | MVCC snapshots with read/write set tracking |
+| **Durability** | WAL with fsync, group commit support |
+
+## Performance
+
+### Batch Inserts
+
+For high-throughput inserts, use batch operations:
+
+```sql
+-- Good: Single INSERT with multiple rows
+INSERT INTO logs (message) VALUES 
+  ('msg1'), ('msg2'), ('msg3'), ('msg4');
+
+-- Better: Use transaction for large batches
+BEGIN;
+INSERT INTO logs (message) VALUES ('msg1');
+INSERT INTO logs (message) VALUES ('msg2');
+-- ... 1000 more inserts ...
+COMMIT;
+```
+
+### Group Commit
+
+SochDB uses group commit to optimize transaction throughput:
+
+```
+N* = √(2 × L_fsync × λ / C_wait)
+
+Where:
+- L_fsync = fsync latency (~5ms typical)
+- λ = arrival rate (ops/sec)
+- C_wait = cost per unit wait time
+```
+
+## Complexity
+
+| Operation | Time Complexity | Notes |
+|-----------|-----------------|-------|
+| INSERT | O(log N) | B-Tree index update |
+| INSERT (conflict) | O(log N) | Uniqueness check |
+| UPDATE (no index) | O(N) | Full table scan |
+| UPDATE (with index) | O(log N + K) | K = affected rows |
+| DELETE (no index) | O(N) | Full table scan |
+| DELETE (with index) | O(log N + K) | K = affected rows |
+| BEGIN/COMMIT | O(1) | Transaction start/commit |
+| ROLLBACK | O(K) | K = modified rows |
+
+## Limitations
+
+<Warning>
+**Current Limitations:**
+- RETURNING clause not yet implemented
+- UPDATE/DELETE with JOINs has limited support
+- Correlated subqueries are not supported
+- Window functions not available in UPDATE/DELETE
+</Warning>
+
+## See Also
+
+- [DDL (Data Definition)](/api/sql/ddl) - CREATE, DROP, ALTER
+- [Queries](/api/sql/queries) - SELECT statements
+- [Transactions](https://sochdb.dev/docs) - ACID transaction details

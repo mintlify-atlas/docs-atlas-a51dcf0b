@@ -1,0 +1,199 @@
+---
+title: Introduction
+description: SochDB is a single database that replaces your vector DB + relational DB + prompt packer stack. Store structured data, embeddings, and conversation history together—then ask SochDB to assemble token-optimized context for your LLM.
+---
+
+<img src="https://github.com/sochdb/sochdb/raw/main/sochdbicon.png" alt="SochDB" width="72" height="72" />
+
+# Welcome to SochDB
+
+SochDB is a **single database** that replaces your vector DB + relational DB + prompt packer stack. Store structured data, embeddings, and conversation history together—then ask SochDB to assemble token-optimized context for your LLM.
+
+<CardGroup cols={2}>
+  <Card title="Get started in 5 minutes" icon="rocket" href="/quickstart">
+    Install SochDB and run your first database operation
+  </Card>
+  <Card title="Installation guide" icon="download" href="/installation">
+    Install SDKs for Python, Node.js, Go, and Rust
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference">
+    Explore the complete API documentation
+  </Card>
+  <Card title="Examples" icon="flask" href="/essentials">
+    Browse real-world examples and use cases
+  </Card>
+</CardGroup>
+
+## Why SochDB?
+
+### The typical AI agent stack
+
+Most "agent stacks" glue together multiple services:
+
+- A KV store for sessions and state
+- A vector DB for retrieval
+- A prompt packer for context budgeting and truncation
+- A relational DB for metadata
+
+You end up managing:
+- 4 different query languages
+- 4 sets of credentials
+- 4 failure modes
+- No cross-system transactions
+- Weeks of glue code
+
+### With SochDB
+
+SochDB collapses that stack into **one LLM-native substrate**:
+
+- Single query language (SQL + extensions)
+- One connection
+- ACID transactions
+- Token budgeting built-in
+- Zero external dependencies
+- Works offline
+- Deploys anywhere
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="Context query builder" icon="brain">
+    Assemble system + user + history + retrieval under a token budget
+  </Card>
+  <Card title="Hybrid search" icon="magnifying-glass">
+    HNSW vectors + BM25 keywords with reciprocal rank fusion
+  </Card>
+  <Card title="Graph overlay" icon="diagram-project">
+    Lightweight relationship tracking for agent memory
+  </Card>
+  <Card title="Embedded-first" icon="bolt">
+    ~700KB binary, no runtime dependencies, SQLite-style simplicity
+  </Card>
+  <Card title="Full ACID" icon="lock">
+    MVCC + WAL + Serializable Snapshot Isolation
+  </Card>
+  <Card title="Columnar storage" icon="table">
+    Read only the columns you need for better performance
+  </Card>
+</CardGroup>
+
+## Quick preview
+
+Here's how simple it is to get started with SochDB:
+
+<CodeGroup>
+```python Python
+from sochdb import Database
+
+db = Database.open("./my_db")
+db.put(b"users/alice", b"Alice Smith")
+print(db.get(b"users/alice").decode())  # "Alice Smith"
+db.close()
+```
+
+```typescript Node.js
+import { Database } from '@sochdb/sochdb';
+
+const db = await Database.open('./my_db');
+await db.put('users/alice', 'Alice Smith');
+console.log(await db.get('users/alice'));  // "Alice Smith"
+await db.close();
+```
+
+```go Go
+import sochdb "github.com/sochdb/sochdb-go"
+
+db, _ := sochdb.Open("./my_db")
+defer db.Close()
+
+db.Put([]byte("users/alice"), []byte("Alice Smith"))
+value, _ := db.Get([]byte("users/alice"))
+fmt.Println(string(value))  // "Alice Smith"
+```
+
+```rust Rust
+use sochdb::Database;
+
+let db = Database::open("./my_db")?;
+db.put(b"users/alice", b"Alice Smith")?;
+
+if let Some(value) = db.get(b"users/alice")? {
+    println!("{}", String::from_utf8_lossy(&value));  // "Alice Smith"
+}
+```
+</CodeGroup>
+
+## What you can rely on today
+
+### LLM and agent primitives
+
+- **TOON**: Compact, model-friendly output for context windows
+- **Graph overlay**: Lightweight agent-memory graph with BFS/DFS traversal
+- **ContextQuery builder**: Token budgets, deduplication, and multi-source fusion
+- **Policy hooks**: Safety controls with pre-built policy templates
+- **Tool routing**: Multi-agent coordination with dynamic discovery
+- **Hybrid retrieval**: Vector + BM25 keyword with Reciprocal Rank Fusion (RRF)
+- **Multi-vector documents**: Chunk-level aggregation (max / mean / first)
+- **Vector search (HNSW)**: Integrated into retrieval workflows
+
+### Database fundamentals
+
+- **SQL (SQL-92)**: SELECT / INSERT / UPDATE / DELETE / JOINs
+- **ACID transactions** with **MVCC**
+- **WAL durability** + **group commit**
+- **Serializable Snapshot Isolation (SSI)**
+- **Columnar storage** with projection pushdown
+- **Sync-first architecture**: Async runtime (tokio) is optional
+
+### Developer experience
+
+- **Multiple SDKs**: Python, Node.js, Go, and Rust
+- **Embedded mode (FFI)** for lowest latency
+- **IPC mode (Unix sockets)** for multi-process deployments
+- **Namespace isolation** for multi-tenant apps
+- **Typed error taxonomy** with remediation hints
+- **Bulk vector operations** for high-throughput ingestion
+
+<Note>
+SochDB is currently **single-node only** (no replication or clustering yet).
+</Note>
+
+## Performance
+
+SochDB delivers exceptional performance for AI workloads:
+
+### Vector search benchmarks
+
+Tested against ChromaDB and LanceDB using the industry-standard VectorDBBench on 50K vectors (OpenAI 1536D):
+
+| Metric | SochDB | ChromaDB | LanceDB |
+|--------|--------|----------|---------|
+| Avg latency | **3.3 ms** | 15.4 ms | 5.6 ms |
+| P99 latency | **5.9 ms** | 22.3 ms | 12.2 ms |
+| Recall@100 | 98.99% | 99.66% | 65.74% |
+| Insert (50K) | **0.1 s** | 76.9 s | 0.4 s |
+
+<Note>
+**SochDB is 4.7× faster than ChromaDB** for search while maintaining 99% recall accuracy.
+</Note>
+
+### Memory agent benchmarks
+
+Tested using MemoryAgentBench (UCSD) for long-context retrieval:
+
+| System | Exact Match | F1 Score | Query Time |
+|--------|-------------|----------|------------|
+| **SochDB V2** | **60.0%** | **61.7%** | **2.1 s** |
+| GraphRAG | 25.0% | 40.6% | 11.9 s |
+| Mem0 | 5.0% | 18.5% | 1.0 s |
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="play" href="/quickstart">
+    Get up and running in under 5 minutes
+  </Card>
+  <Card title="Installation" icon="download" href="/installation">
+    Install the SDK for your preferred language
+  </Card>
+</CardGroup>

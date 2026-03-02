@@ -1,0 +1,300 @@
+---
+title: "Architecture"
+description: "Deep dive into SochDB's modular architecture and sync-first design"
+---
+
+## Overview
+
+SochDB is built as a **single embedded database** that replaces your vector DB + relational DB + prompt packer stack. Its architecture prioritizes simplicity, performance, and LLM-native workflows.
+
+## Crate Structure
+
+SochDB is organized into focused, composable crates:
+
+```text
+App / Agent Runtime
+   │
+   ├─ sochdb-client (Rust / Python)
+   │
+   ├─ sochdb-query   (planner + TOON encoder + context builder)
+   └─ sochdb-kernel  (MVCC + WAL + catalog)
+        ├─ sochdb-storage (columnar LSCS + mmap)
+        └─ sochdb-index   (B-Tree + HNSW)
+```
+
+### Core Crates
+
+| Crate | Description | Key Components |
+|-------|-------------|----------------|
+| `sochdb-core` | Core types and TOON format | `SochValue`, `SochSchema`, `SochTable`, codec |
+| `sochdb-kernel` | Database kernel | WAL, MVCC, transactions, catalog |
+| `sochdb-storage` | Storage engine | LSCS columnar, mmap, block checksums |
+| `sochdb-index` | Index structures | B-Tree, HNSW vector index |
+| `sochdb-query` | Query execution | Cost optimizer, context builder, SOCH-QL |
+| `sochdb-client` | Client SDK | `SochConnection`, `PathQuery`, `BatchWriter` |
+| `sochdb-plugin-logging` | Logging plugin | Structured logging, tracing |
+
+<Note>
+The modular design allows each crate to evolve independently while maintaining stable APIs. This is particularly important for the kernel, which stays under **~5,000 LOC** for auditability.
+</Note>
+
+## Sync-First Design
+
+Unlike most databases that build async-first, SochDB uses a **sync-first architecture** with optional async runtime:
+
+### Why Sync-First?
+
+<AccordionGroup>
+  <Accordion title="Smaller Binaries">
+    Async runtime (tokio) is optional, reducing binary size by **~500KB** for embedded use cases.
+  </Accordion>
+  
+  <Accordion title="SQLite-Style Simplicity">
+    Follows SQLite's proven design philosophy: simple, deterministic, easy to debug.
+  </Accordion>
+  
+  <Accordion title="Maximum Compatibility">
+    Works in environments without async support: WASM, embedded systems, mobile apps.
+  </Accordion>
+  
+  <Accordion title="Lower Latency">
+    Eliminates async overhead for single-threaded workloads common in embedded scenarios.
+  </Accordion>
+</AccordionGroup>
+
+```rust
+// Sync API (default)
+let db = Database::open("./my_db")?;
+db.put(b"users/alice", b"Alice Smith")?;
+
+// Async API (optional, requires 'async' feature)
+let db = Database::open_async("./my_db").await?;
+db.put_async(b"users/alice", b"Alice Smith").await?;
+```
+
+## Columnar Storage
+
+SochDB uses **columnar storage** to dramatically reduce I/O overhead:
+
+### Row-Store vs Column-Store
+
+<CodeGroup>
+```text Row-Store (Traditional)
+┌──────────────────────────────────┐
+│ Row 1: id=1, name=Alice, age=30  │ ← Must read entire row
+│ Row 2: id=2, name=Bob, age=25    │ ← Even if you only need 'age'
+│ Row 3: id=3, name=Charlie, age=35│
+└──────────────────────────────────┘
+Query: SELECT age FROM users
+I/O: Reads ALL columns (100% overhead)
+```
+
+```text Column-Store (SochDB)
+┌─────────┬──────────┬────────┐
+│ id      │ name     │ age    │
+├─────────┼──────────┼────────┤
+│ 1       │ Alice    │ 30     │ ← Only read 'age' column
+│ 2       │ Bob      │ 25     │
+│ 3       │ Charlie  │ 35     │
+└─────────┴──────────┴────────┘
+Query: SELECT age FROM users
+I/O: Reads ONLY 'age' column (80% reduction)
+```
+</CodeGroup>
+
+### Projection Pushdown
+
+<Info>
+**Projection pushdown** means SochDB reads only the columns you SELECT, not the entire row. This provides **80% I/O reduction** for typical LLM context queries.
+</Info>
+
+```rust
+use sochdb::Database;
+
+let db = Database::open("./data")?;
+
+// Only reads 'id', 'title', 'summary' columns
+// Skips 'content', 'metadata', 'embeddings'
+let results = db.query(
+    "SELECT id, title, summary FROM documents WHERE category = 'tech'"
+)?;
+
+// Massive I/O savings for wide tables with many columns
+```
+
+### Memory Layout
+
+SochDB's columnar storage uses **Arrow-compatible layouts** for SIMD efficiency:
+
+```text
+┌─────────────────────────────────────────────────────────┐
+│                    Int64 Column                         │
+├─────────────────────────────────────────────────────────┤
+│ Values:   [1, 2, 3, 4, 5, 6, 7, 8]  ← Contiguous array │
+│ Validity: [1, 1, 1, 0, 1, 1, 1, 1]  ← 1 bit per value  │
+└─────────────────────────────────────────────────────────┘
+
+Memory savings:
+- Row-store (tagged union): 32 bytes per value
+- Column-store (typed array): 8 bytes + 1 bit validity = ~8.125 bytes
+- Reduction: 75%
+```
+
+## Kernel Architecture
+
+The **kernel** is the minimal ACID core ({"<"}5,000 LOC) with a plugin system:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Extension Layer                          │
+│  ┌─────────────┐ ┌─────────────┐ ┌─────────────────────┐   │
+│  │ LSCS Plugin │ │Vector Plugin│ │ Observability Plugin│   │
+│  └──────┬──────┘ └──────┬──────┘ └──────────┬──────────┘   │
+│         │               │                    │              │
+│         ▼               ▼                    ▼              │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │              Plugin Manager (Registry)               │   │
+│  └─────────────────────────┬───────────────────────────┘   │
+└────────────────────────────┼────────────────────────────────┘
+                             │
+┌────────────────────────────┼────────────────────────────────┐
+│                            ▼                                │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │                 Kernel API (Traits)                  │   │
+│  │   KernelStorage, KernelTransaction, KernelCatalog    │   │
+│  └─────────────────────────────────────────────────────┘   │
+│                                                             │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────┐   │
+│  │   WAL    │ │   MVCC   │ │  Pager   │ │   Catalog    │   │
+│  │ Recovery │ │   Txn    │ │  Buffer  │ │   Schema     │   │
+│  └──────────┘ └──────────┘ └──────────┘ └──────────────┘   │
+│                                                             │
+│                     KERNEL (~5K LOC)                        │
+│              Auditable • Stable API • ACID                  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Design Principles
+
+1. **Minimal Core**: Only ACID-critical code in kernel
+2. **Plugin Everything**: Storage backends, indices, observability are plugins
+3. **No Dependency Bloat**: Core has minimal deps, plugins bring their own
+4. **Stable API**: Kernel API is versioned, plugins evolve independently
+5. **Auditable**: Small enough for formal verification
+
+### Plugin Categories
+
+| Category | Trait | Purpose |
+|----------|-------|------|
+| Storage | `StorageExtension` | Alternative storage backends (LSCS, RocksDB) |
+| Index | `IndexExtension` | Custom index types (vector, learned, full-text) |
+| Observability | `ObservabilityExtension` | Metrics, tracing, logging backends |
+| Compression | `CompressionExtension` | Compression algorithms |
+
+<Note>
+Plugins prevent dependency bloat. For example, Prometheus monitoring is a plugin—you only pull in those dependencies if you need them.
+</Note>
+
+## Component Diagram
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                     YOUR APPLICATION                     │
+└─────────────────────────┬───────────────────────────────┘
+                          │
+                          ▼
+        ┌─────────────────────────────────────┐
+        │             SochDB                  │
+        │                                     │
+        │   SQL + Vectors + Context Builder   │
+        │                                     │
+        │   • One query language              │
+        │   • One connection                  │
+        │   • ACID transactions               │
+        │   • Token budgeting built-in        │
+        │                                     │
+        └─────────────────────────────────────┘
+                          │
+        ┌─────────────────┴─────────────────┐
+        │  What you actually ship:          │
+        │  • Single ~700KB embedded DB      │
+        │  • Zero external dependencies     │
+        │  • Works offline                  │
+        │  • Deploys anywhere               │
+        └───────────────────────────────────┘
+```
+
+## Performance Characteristics
+
+### I/O Optimization
+
+| Component | Strategy | Benefit |
+|-----------|----------|------|
+| **Storage** | Columnar layout | 80% I/O reduction via projection pushdown |
+| **Index** | B-Tree + HNSW | O(log N) point lookups, O(log N + K) vector search |
+| **Reads** | Memory-mapped I/O | Zero-copy reads, OS page cache |
+| **Writes** | WAL + Group commit | Batch fsync for throughput |
+
+### Memory Efficiency
+
+```
+Typical row-store:  32 bytes per value (tagged union + padding)
+SochDB columnar:    ~8 bytes per value (typed array + validity bitmap)
+Memory reduction:   75%
+```
+
+## Code Budget
+
+To ensure auditability, SochDB maintains strict code budgets:
+
+| Component | Target LOC | Purpose |
+|-----------|-----------|------|
+| WAL | ~1,000 | Write-ahead logging |
+| Transaction | ~800 | MVCC, isolation levels |
+| Page Manager | ~1,000 | Buffer pool, caching |
+| Catalog | ~500 | Schema management |
+| Plugin System | ~700 | Extension registration |
+| Error Handling | ~500 | Unified error types |
+| **Total Kernel** | **~5,000** | Core ACID guarantees |
+
+<Info>
+The 5,000 LOC budget makes the kernel small enough for formal verification and security audits—a critical requirement for production databases.
+</Info>
+
+## Deployment Flexibility
+
+SochDB's architecture supports multiple deployment modes:
+
+<CardGroup cols={2}>
+  <Card title="Embedded" icon="microchip">
+    Single ~700KB binary, zero dependencies. Perfect for mobile, desktop, and edge devices.
+  </Card>
+  
+  <Card title="IPC (Unix Sockets)" icon="share-nodes">
+    Multi-process deployments with namespace isolation. Ideal for microservices.
+  </Card>
+  
+  <Card title="gRPC Server" icon="server">
+    Network-accessible via Docker. Production-ready with Prometheus + Grafana monitoring.
+  </Card>
+  
+  <Card title="WASM" icon="globe">
+    In-browser or edge runtime. Runs anywhere JavaScript runs.
+  </Card>
+</CardGroup>
+
+## Related Concepts
+
+<CardGroup cols={2}>
+  <Card title="TOON Format" icon="table" href="/concepts/toon-format">
+    Learn about SochDB's token-optimized output format
+  </Card>
+  
+  <Card title="ACID Transactions" icon="lock" href="/concepts/acid-transactions">
+    Understand MVCC and transaction isolation
+  </Card>
+  
+  <Card title="Vector Search" icon="magnifying-glass" href="/concepts/vector-search">
+    Explore HNSW indexing and similarity search
+  </Card>
+</CardGroup>

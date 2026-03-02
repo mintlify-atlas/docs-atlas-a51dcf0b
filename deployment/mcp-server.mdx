@@ -1,0 +1,709 @@
+---
+title: MCP Server
+description: Connect SochDB to AI assistants via Model Context Protocol
+---
+
+The SochDB MCP server exposes SochDB's AI-native features to LLM clients like Claude Desktop, Cursor, and ChatGPT via the **Model Context Protocol (MCP)**.
+
+## What is MCP?
+
+The **Model Context Protocol** is a standard interface for connecting AI assistants to external data sources and tools. It allows LLMs to:
+
+- Query databases with natural language
+- Access real-time context from your data
+- Execute operations without custom integrations
+- Maintain conversation state across sessions
+
+```
+MCP Client (Claude, Cursor, etc.)
+     │
+     │ JSON-RPC over stdio
+     ▼
+┌─────────────────────────────────┐
+│  sochdb-mcp                     │
+│  - Stdio framing (~50 lines)    │
+│  - JSON-RPC dispatch            │
+│  - MCP methods                  │
+└─────────────────────────────────┘
+     │
+     │ Direct Rust calls
+     ▼
+┌─────────────────────────────────┐
+│  SochDB                         │
+│  - Context queries → AI context │
+│  - TOON format → token savings  │
+│  - Path-based access            │
+└─────────────────────────────────┘
+```
+
+## Why SochDB + MCP?
+
+SochDB is already **AI-native**, with built-in:
+
+- **Token budgeting** for LLM context windows
+- **TOON format** for dense, efficient output (67% token reduction vs JSON)
+- **Context queries** that assemble multi-source context
+- **Hybrid search** (vector + keyword)
+- **Graph overlay** for agent memory
+
+The MCP server is just a **thin adapter** (~500 lines) that translates JSON-RPC calls to SochDB operations.
+
+## Installation
+
+<Steps>
+
+<Step title="Build from source">
+```bash
+cd sochdb
+cargo build --release --package sochdb-mcp
+```
+Binary is at `target/release/sochdb-mcp`
+</Step>
+
+<Step title="Verify installation">
+```bash
+./target/release/sochdb-mcp --help
+
+# Output:
+# SochDB MCP Server
+# 
+# Usage: sochdb-mcp [OPTIONS]
+# 
+# Options:
+#   --db <PATH>    Database path [default: ./sochdb-data]
+#   --help         Print help
+```
+</Step>
+
+<Step title="Test it works">
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | \
+  ./target/release/sochdb-mcp --db ./test_data
+
+# Should return JSON response with MCP capabilities
+```
+</Step>
+
+</Steps>
+
+## Configuration
+
+### Claude Desktop
+
+**Config location:**
+
+- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+- **Linux**: `~/.config/Claude/claude_desktop_config.json`
+
+<Steps>
+
+<Step title="Open Claude Desktop Settings">
+Claud Desktop → Settings → Developer → Edit Config
+</Step>
+
+<Step title="Add SochDB MCP server">
+```json claude_desktop_config.json
+{
+  "mcpServers": {
+    "sochdb": {
+      "command": "/path/to/sochdb-mcp",
+      "args": ["--db", "/path/to/your/database"],
+      "env": {
+        "RUST_LOG": "info"
+      }
+    }
+  }
+}
+```
+
+<Warning>
+  Use **absolute paths** for the command and database directory.
+</Warning>
+</Step>
+
+<Step title="Restart Claude Desktop">
+Restart the application to load the new configuration.
+</Step>
+
+<Step title="Verify connection">
+Look for the 🔧 tools icon in Claude Desktop. You should see SochDB tools available:
+
+- `sochdb.get`
+- `sochdb.put`
+- `sochdb.query`
+- `sochdb.context_query`
+- And more...
+</Step>
+
+</Steps>
+
+### Cursor IDE
+
+**Config location:** `~/.cursor/mcp.json`
+
+<Steps>
+
+<Step title="Open Cursor Settings">
+Cursor → Settings (`Cmd+,` or `Ctrl+,`) → Cursor Settings → Tools & MCP
+</Step>
+
+<Step title="Add new global MCP server">
+```json ~/.cursor/mcp.json
+{
+  "mcpServers": {
+    "sochdb": {
+      "command": "/path/to/sochdb-mcp",
+      "args": ["--db", "/path/to/your/database"]
+    }
+  }
+}
+```
+</Step>
+
+<Step title="Restart Cursor">
+Restart Cursor to activate the MCP server.
+</Step>
+
+</Steps>
+
+### VS Code + Continue.dev
+
+**Config location:** `~/.continue/config.json`
+
+```json ~/.continue/config.json
+{
+  "experimental": {
+    "modelContextProtocolServers": [
+      {
+        "transport": {
+          "type": "stdio",
+          "command": "/path/to/sochdb-mcp",
+          "args": ["--db", "/path/to/your/database"]
+        }
+      }
+    ]
+  }
+}
+```
+
+### Zed Editor
+
+**Config location:** `~/.config/zed/settings.json`
+
+```json ~/.config/zed/settings.json
+{
+  "context_servers": {
+    "sochdb": {
+      "command": {
+        "path": "/path/to/sochdb-mcp",
+        "args": ["--db", "/path/to/your/database"]
+      }
+    }
+  }
+}
+```
+
+### Generic MCP Client
+
+For any MCP-compatible client:
+
+| Setting | Value |
+|---------|-------|
+| Transport | stdio |
+| Command | `/path/to/sochdb-mcp` |
+| Arguments | `--db /path/to/database` |
+| Environment | `RUST_LOG=info` (optional) |
+
+## Available Tools
+
+Once connected, these SochDB tools become available to the AI assistant:
+
+### `sochdb.context_query`
+
+**Fetch AI-optimized context with token budgeting** — SochDB's killer feature for LLMs.
+
+Assembles context from multiple sources (recent history, vector search, user profile) while respecting token limits.
+
+<CodeGroup>
+
+```json Request
+{
+  "name": "sochdb.context_query",
+  "arguments": {
+    "sections": [
+      {
+        "name": "recent_messages",
+        "priority": 10,
+        "kind": "last",
+        "table": "messages",
+        "top_k": 5
+      },
+      {
+        "name": "user_profile",
+        "priority": 20,
+        "kind": "get",
+        "path": "users/current"
+      },
+      {
+        "name": "relevant_docs",
+        "priority": 5,
+        "kind": "search",
+        "collection": "knowledge_base",
+        "vector": [0.1, 0.2, ...],
+        "top_k": 3
+      }
+    ],
+    "token_budget": 2000
+  }
+}
+```
+
+```json Response
+{
+  "context": "messages[5]{id,role,content}:\n1,user,What's the weather?\n2,assistant,Let me check...\n\nusers[1]{name,email}:\nalice,alice@example.com\n\ndocs[3]{title,content}:\nWeather API Guide,Use GET /weather...",
+  "token_count": 187,
+  "sections_used": 3
+}
+```
+
+</CodeGroup>
+
+**Benefits:**
+
+- Automatic token counting and budget enforcement
+- Multi-source fusion (DB + vector search + history)
+- TOON format output (67% token reduction)
+- Deduplication across sources
+
+### `sochdb.query`
+
+Execute SochQL (SQL-compatible) queries directly.
+
+```json
+{
+  "name": "sochdb.query",
+  "arguments": {
+    "query": "SELECT name, email FROM users WHERE active = true LIMIT 10"
+  }
+}
+```
+
+### `sochdb.get` / `sochdb.put` / `sochdb.delete`
+
+Path-based CRUD operations with **O(|path|) complexity**.
+
+<CodeGroup>
+
+```json Get
+{
+  "name": "sochdb.get",
+  "arguments": {
+    "path": "users/123/profile/name"
+  }
+}
+```
+
+```json Put
+{
+  "name": "sochdb.put",
+  "arguments": {
+    "path": "users/123/profile/name",
+    "value": "Alice Smith"
+  }
+}
+```
+
+```json Delete
+{
+  "name": "sochdb.delete",
+  "arguments": {
+    "path": "users/123/profile/avatar"
+  }
+}
+```
+
+</CodeGroup>
+
+### `sochdb.scan`
+
+List keys with optional prefix filter.
+
+```json
+{
+  "name": "sochdb.scan",
+  "arguments": {
+    "prefix": "users/123/",
+    "limit": 100
+  }
+}
+```
+
+### `sochdb.list_tables`
+
+List all tables in the database.
+
+```json
+{
+  "name": "sochdb.list_tables",
+  "arguments": {}
+}
+```
+
+### `sochdb.describe`
+
+Get table schema.
+
+```json
+{
+  "name": "sochdb.describe",
+  "arguments": {
+    "table": "users"
+  }
+}
+```
+
+### Conversation Tools
+
+**Agent memory and episode management:**
+
+- `sochdb.create_episode` — Start a new conversation
+- `sochdb.add_turn` — Add message to episode
+- `sochdb.search_episodes` — Search conversation history
+
+```json
+{
+  "name": "sochdb.create_episode",
+  "arguments": {
+    "episode_id": "conv_2026_03_02",
+    "metadata": {
+      "user": "alice",
+      "topic": "database deployment"
+    }
+  }
+}
+```
+
+## Use Cases
+
+### 1. Natural Language Database Queries
+
+**User:** "Show me all active users who signed up this week"
+
+**Claude (via MCP):**
+```json
+// Claude uses sochdb.query tool
+{
+  "name": "sochdb.query",
+  "arguments": {
+    "query": "SELECT name, email, created_at FROM users WHERE active = true AND created_at >= '2026-02-24' ORDER BY created_at DESC"
+  }
+}
+```
+
+### 2. Context-Aware Conversations
+
+**User:** "What were we discussing yesterday about deployment?"
+
+**Claude (via MCP):**
+```json
+// Claude uses context_query to fetch relevant history
+{
+  "name": "sochdb.context_query",
+  "arguments": {
+    "sections": [
+      {
+        "name": "recent_conversations",
+        "kind": "search",
+        "collection": "episodes",
+        "text_query": "deployment",
+        "top_k": 5
+      }
+    ],
+    "token_budget": 2000
+  }
+}
+```
+
+### 3. Semantic Search
+
+**User:** "Find documentation about vector search optimization"
+
+**Claude (via MCP):**
+```json
+{
+  "name": "sochdb.context_query",
+  "arguments": {
+    "sections": [
+      {
+        "name": "docs",
+        "kind": "search",
+        "collection": "documentation",
+        "vector": [/* embedding of query */],
+        "text_query": "vector search optimization",
+        "top_k": 5
+      }
+    ],
+    "token_budget": 3000
+  }
+}
+```
+
+### 4. Multi-Source Context Assembly
+
+**User:** "Give me a summary of this customer's account"
+
+**Claude (via MCP):**
+```json
+{
+  "name": "sochdb.context_query",
+  "arguments": {
+    "sections": [
+      {
+        "name": "profile",
+        "priority": 10,
+        "kind": "get",
+        "path": "customers/cust_123/profile"
+      },
+      {
+        "name": "recent_orders",
+        "priority": 5,
+        "kind": "last",
+        "table": "orders",
+        "filter": {"customer_id": "cust_123"},
+        "top_k": 10
+      },
+      {
+        "name": "support_tickets",
+        "priority": 3,
+        "kind": "last",
+        "table": "tickets",
+        "filter": {"customer_id": "cust_123"},
+        "top_k": 5
+      }
+    ],
+    "token_budget": 4000
+  }
+}
+```
+
+## Protocol Details
+
+### MCP Version
+
+**Protocol version:** `2024-11-05`
+
+### Transport
+
+**stdio** (stdin/stdout with Content-Length framing)
+
+All protocol messages use JSON-RPC 2.0 format:
+
+```
+Content-Length: 123\r\n
+\r\n
+{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}
+```
+
+### Capabilities
+
+The server advertises these capabilities:
+
+```json
+{
+  "capabilities": {
+    "tools": {
+      "listChanged": false
+    },
+    "resources": {
+      "listChanged": false,
+      "subscribe": false
+    }
+  },
+  "protocolVersion": "2024-11-05",
+  "serverInfo": {
+    "name": "sochdb-mcp",
+    "version": "0.5.0"
+  }
+}
+```
+
+### Logging
+
+All logs go to **stderr** (stdout is reserved for protocol messages).
+
+Enable debug logging:
+
+```bash
+RUST_LOG=sochdb_mcp=debug sochdb-mcp --db ./my_db
+```
+
+## Architecture
+
+The MCP server is intentionally minimal:
+
+| Component | Lines of Code | Purpose |
+|-----------|--------------|----------|
+| Stdio framing | ~100 | Content-Length protocol |
+| JSON-RPC types | ~100 | Request/response serialization |
+| MCP protocol | ~200 | `initialize`, `tools/list`, `tools/call` |
+| Tool execution | ~200 | Translate to SochDB operations |
+| **Total** | **~600** | **No external MCP framework** |
+
+**Why this approach?**
+
+1. **SochDB is already AI-native** — context queries, token budgets, and TOON format are built-in
+2. **Thin is good** — MCP server just translates JSON-RPC ↔ SochDB calls
+3. **No framework bloat** — Uses only `serde_json` + SochDB
+
+## Troubleshooting
+
+### "Server not found"
+
+<Steps>
+
+<Step title="Use absolute paths">
+```json
+// ❌ Wrong
+"command": "sochdb-mcp"
+
+// ✅ Correct
+"command": "/Users/alice/sochdb/target/release/sochdb-mcp"
+```
+</Step>
+
+<Step title="Verify binary exists">
+```bash
+ls -la /path/to/sochdb-mcp
+# Should show executable permissions
+```
+</Step>
+
+<Step title="Test manually">
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | \
+  /path/to/sochdb-mcp --db ./test
+```
+</Step>
+
+</Steps>
+
+### "Database connection failed"
+
+```bash
+# Check database path exists
+ls -la /path/to/your/database
+
+# Check permissions
+stat /path/to/your/database
+
+# Create directory if needed
+mkdir -p /path/to/your/database
+```
+
+### "No tools showing"
+
+<Steps>
+
+<Step title="Restart the AI application">
+Changes to MCP config require a restart.
+</Step>
+
+<Step title="Check logs">
+```json
+{
+  "mcpServers": {
+    "sochdb": {
+      "command": "/path/to/sochdb-mcp",
+      "args": ["--db", "/path/to/database"],
+      "env": {
+        "RUST_LOG": "debug"  // Enable debug logging
+      }
+    }
+  }
+}
+```
+</Step>
+
+<Step title="Verify initialization">
+Check AI application logs for MCP initialization messages.
+</Step>
+
+</Steps>
+
+### "Tool execution failed"
+
+<CodeGroup>
+
+```bash Check Database
+# Test database access
+cd /path/to/database
+ls -la
+# Should see sochdb files
+```
+
+```bash Test Query
+# Use sochdb CLI to test query
+sochdb-cli --db /path/to/database query "SELECT 1"
+```
+
+</CodeGroup>
+
+### Performance Issues
+
+```bash
+# Increase log level to find bottlenecks
+export RUST_LOG=sochdb_mcp=trace,sochdb=debug
+
+# Check database size
+du -sh /path/to/database
+
+# Monitor resource usage
+top -p $(pgrep sochdb-mcp)
+```
+
+<Info>
+  For large databases, consider using [Docker deployment](/deployment/docker) with dedicated resources.
+</Info>
+
+## Example Session
+
+Here's what a typical MCP session looks like:
+
+**1. Initialize connection:**
+
+```json
+→ {"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}
+← {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{...}}}
+```
+
+**2. List available tools:**
+
+```json
+→ {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+← {"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"sochdb.query","description":"Execute SQL query",...}]}}
+```
+
+**3. Execute query:**
+
+```json
+→ {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"sochdb.query","arguments":{"query":"SELECT * FROM users LIMIT 5"}}}
+← {"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"users[5]{id,name,email}:..."}]}}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Embedded Deployment" icon="cube" href="/deployment/embedded">
+    Run SochDB in-process for desktop/mobile apps
+  </Card>
+  <Card title="Docker Deployment" icon="docker" href="/deployment/docker">
+    Deploy as a production gRPC server
+  </Card>
+</CardGroup>
+
+## Additional Resources
+
+- [MCP Specification](https://modelcontextprotocol.io)
+- [SochDB MCP Source Code](https://github.com/sochdb/sochdb/tree/main/sochdb-mcp)
+- [Claude Desktop MCP Guide](https://docs.anthropic.com/claude/docs/model-context-protocol)

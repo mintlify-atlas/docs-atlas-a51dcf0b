@@ -1,0 +1,389 @@
+---
+title: 'Python SDK'
+description: 'Official Python SDK for SochDB with FFI and IPC support'
+icon: 'python'
+---
+
+## Overview
+
+The SochDB Python SDK provides high-performance embedded database access with:
+
+- **Embedded mode (FFI)** for lowest latency
+- **IPC mode (Unix sockets)** for multi-process deployments
+- **Namespace isolation** for multi-tenant apps
+- **Batch operations** with 4-5× faster inserts via BatchAccumulator
+- **Vector search** with HNSW indexing
+- **Transactions** with ACID guarantees
+
+## Installation
+
+<CodeGroup>
+
+```bash pip
+pip install sochdb
+```
+
+```bash poetry
+poetry add sochdb
+```
+
+```bash conda
+conda install -c conda-forge sochdb
+```
+
+</CodeGroup>
+
+## Basic Usage
+
+### Opening a Database
+
+```python
+from sochdb import Database
+
+# Open or create a database
+db = Database.open("./my_db")
+
+# Basic operations
+db.put(b"users/alice", b"Alice Smith")
+value = db.get(b"users/alice")
+print(value.decode())  # "Alice Smith"
+
+db.close()
+```
+
+### Path-Based Access
+
+```python
+from sochdb import Database
+
+db = Database.open("./my_db")
+
+# Hierarchical key structure
+db.put_path("users/alice/name", b"Alice Smith")
+db.put_path("users/alice/email", b"alice@example.com")
+db.put_path("users/bob/name", b"Bob Jones")
+
+# Read by path
+name = db.get_path("users/alice/name")
+print(name.decode())  # "Alice Smith"
+
+# Range scanning
+users = list(db.scan(b"users/", b"users/~"))
+for key, value in users:
+    print(f"{key.decode()}: {value.decode()}")
+
+db.close()
+```
+
+## Transactions
+
+### Basic Transactions
+
+```python
+from sochdb import Database
+
+db = Database.open("./my_db")
+
+# Context manager (auto-commit on success, auto-rollback on error)
+with db.transaction() as txn:
+    txn.put(b"counter", b"100")
+    txn.put(b"updated", b"true")
+
+counter = db.get(b"counter")
+print(counter.decode())  # "100"
+
+db.close()
+```
+
+### Account Transfer Example
+
+```python
+from sochdb import Database
+
+db = Database.open("./bank_db")
+
+# Initialize accounts
+with db.transaction() as txn:
+    txn.put(b"accounts/alice/balance", b"1000")
+    txn.put(b"accounts/bob/balance", b"500")
+
+# Atomic transfer
+try:
+    with db.transaction() as txn:
+        alice_bal = int(txn.get(b"accounts/alice/balance").decode())
+        bob_bal = int(txn.get(b"accounts/bob/balance").decode())
+        
+        transfer_amount = 250
+        
+        if alice_bal >= transfer_amount:
+            txn.put(b"accounts/alice/balance", str(alice_bal - transfer_amount).encode())
+            txn.put(b"accounts/bob/balance", str(bob_bal + transfer_amount).encode())
+        else:
+            raise ValueError("Insufficient funds")
+except ValueError as e:
+    print(f"Transaction failed: {e}")
+
+db.close()
+```
+
+## Vector Search
+
+### Creating a Vector Index
+
+```python
+from sochdb import VectorIndex
+import numpy as np
+
+# Create HNSW index
+index = VectorIndex(
+    dimension=384,
+    max_connections=16,      # HNSW M parameter
+    ef_construction=100       # Build-time search width
+)
+
+print("✓ Index created (384 dimensions)")
+```
+
+### Inserting Vectors
+
+```python
+import numpy as np
+from sochdb import VectorIndex
+
+index = VectorIndex(dimension=768, max_connections=16, ef_construction=100)
+
+# Generate test vectors
+np.random.seed(42)
+n_vectors = 1000
+vectors = np.random.randn(n_vectors, 768).astype(np.float32)
+
+# Normalize for cosine similarity
+vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+
+# Batch insert
+ids = np.arange(n_vectors, dtype=np.uint64)
+index.insert_batch(ids, vectors)
+
+print(f"✓ Inserted {n_vectors} vectors")
+```
+
+### Searching Vectors
+
+```python
+import numpy as np
+from sochdb import VectorIndex
+
+index = VectorIndex(dimension=768, max_connections=16, ef_construction=100)
+
+# ... insert vectors ...
+
+# Create query vector
+query = np.random.randn(768).astype(np.float32)
+query /= np.linalg.norm(query)
+
+# Search for 10 nearest neighbors
+results = index.search(query, k=10)
+
+for id_, distance in results:
+    print(f"ID: {id_}, Distance: {distance:.4f}")
+```
+
+### High-Throughput Batch Insert
+
+The Python SDK's `BatchAccumulator` provides **4-5× faster inserts** by deferring HNSW graph construction:
+
+```python
+from sochdb import VectorIndex
+import numpy as np
+
+index = VectorIndex(dimension=1536, max_connections=16, ef_construction=200)
+
+# Option 1: Context manager (auto-flush)
+with index.batch_accumulator(estimated_size=50_000) as acc:
+    # Zero FFI, pure numpy memcpy
+    acc.add(ids, vectors)
+# HNSW graph built in one shot on exit
+
+# Option 2: Explicit control
+acc = index.batch_accumulator(50_000)
+acc.add(chunk1_ids, chunk1_vecs)
+acc.add(chunk2_ids, chunk2_vecs)
+inserted = acc.flush()  # Single bulk FFI call → full Rayon parallelism
+
+# Option 3: Cross-process persistence
+acc.save("/tmp/vectors")     # Persist to disk
+acc2 = index.batch_accumulator()
+acc2.load("/tmp/vectors")    # Load in another process
+acc2.flush()                 # Build HNSW
+```
+
+## Namespace Isolation
+
+### Creating Namespaces
+
+```python
+from sochdb import Database, CollectionConfig, DistanceMetric
+
+db = Database.open("./my_db")
+
+# Create namespace for tenant isolation
+with db.use_namespace("tenant_acme") as ns:
+    # Create vector collection with frozen config
+    collection = ns.create_collection(
+        CollectionConfig(
+            name="documents",
+            dimension=384,
+            metric=DistanceMetric.COSINE,
+            enable_hybrid_search=True,  # Enable keyword search
+            content_field="text"
+        )
+    )
+    
+    # Insert multi-vector document (e.g., chunked document)
+    collection.insert_multi(
+        id="doc_123",
+        vectors=[chunk_embedding_1, chunk_embedding_2, chunk_embedding_3],
+        metadata={"title": "SochDB Guide", "author": "Alice"},
+        chunk_texts=["Intro text", "Body text", "Conclusion"],
+        aggregate="max"  # Use max score across chunks
+    )
+    
+    # Hybrid search: vector + keyword with RRF fusion
+    results = collection.hybrid_search(
+        vector=query_embedding,
+        text_query="database performance",
+        k=10,
+        alpha=0.7  # 70% vector, 30% keyword
+    )
+
+db.close()
+```
+
+### Context Query for LLM Retrieval
+
+```python
+from sochdb import Database, ContextQuery, DeduplicationStrategy
+
+db = Database.open("./my_db")
+ns = db.namespace("tenant_acme")
+collection = ns.collection("documents")
+
+# Build context with token budgeting
+context = (
+    ContextQuery(collection)
+    .add_vector_query(query_embedding, weight=0.7)
+    .add_keyword_query("machine learning optimization", weight=0.3)
+    .with_token_budget(4000)  # Fit within model context window
+    .with_min_relevance(0.5)  # Filter low-quality results
+    .with_deduplication(DeduplicationStrategy.EXACT)
+    .execute()
+)
+
+# Use in LLM prompt
+prompt = f"""Context:
+{context.as_markdown()}
+
+Question: {user_question}
+"""
+
+print(f"Retrieved {len(context)} chunks using {context.total_tokens} tokens")
+db.close()
+```
+
+## Graph Overlay
+
+Build lightweight graph structures for agent memory:
+
+```python
+from sochdb import Database, GraphOverlay
+
+db = Database.open("./my_db")
+graph = GraphOverlay(db, namespace="agent_memory")
+
+# Build conversation graph
+graph.add_node("msg_1", {"role": "user", "content": "What's the weather?"})
+graph.add_node("msg_2", {"role": "assistant", "content": "Let me check..."})
+graph.add_node("msg_3", {"role": "tool", "content": "Sunny, 72°F"})
+graph.add_node("msg_4", {"role": "assistant", "content": "It's sunny and 72°F"})
+
+# Link causal relationships
+graph.add_edge("msg_1", "msg_2", {"type": "triggers"})
+graph.add_edge("msg_2", "msg_3", {"type": "invokes_tool"})
+graph.add_edge("msg_3", "msg_4", {"type": "provides_context"})
+
+# Traverse conversation history (BFS)
+path = graph.bfs("msg_1", "msg_4")
+print(f"Conversation flow: {' → '.join(path)}")
+
+# Get all tool invocations (neighbors by edge type)
+tools = graph.get_neighbors("msg_2", edge_filter={"type": "invokes_tool"})
+print(f"Tools used: {tools}")
+
+db.close()
+```
+
+## SDK Features
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Basic KV | ✅ | put, get, delete, scan |
+| Transactions | ✅ | ACID with MVCC |
+| Vector Search | ✅ | HNSW indexing |
+| Namespace Isolation | ✅ | Multi-tenant support |
+| Graph Overlay | ✅ | Agent memory tracking |
+| Batch Operations | ✅ | BatchAccumulator for 4-5× speedup |
+| Context Query | ✅ | Token budgeting for LLMs |
+| Hybrid Search | ✅ | Vector + keyword with RRF |
+
+## External Resources
+
+<CardGroup cols={2}>
+
+<Card title="Python SDK Repository" icon="github" href="https://github.com/sochdb/sochdb-python-sdk">
+  Source code and development
+</Card>
+
+<Card title="Python Examples" icon="code" href="https://github.com/sochdb/sochdb-python-examples">
+  Complete working examples
+</Card>
+
+</CardGroup>
+
+## Performance Tips
+
+<AccordionGroup>
+
+<Accordion title="Use BatchAccumulator for bulk inserts">
+  For inserting >1000 vectors, use `batch_accumulator()` instead of individual `insert()` calls. This provides 4-5× speedup by deferring HNSW graph construction.
+</Accordion>
+
+<Accordion title="Normalize vectors for cosine similarity">
+  When using cosine similarity, normalize your vectors before insertion:
+  ```python
+  vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+  ```
+</Accordion>
+
+<Accordion title="Use namespaces for multi-tenant apps">
+  Namespaces provide isolation and prevent key collisions between tenants without requiring separate database instances.
+</Accordion>
+
+<Accordion title="Leverage transactions for consistency">
+  Use `with db.transaction()` for operations that must succeed or fail atomically. The context manager automatically commits on success and rolls back on error.
+</Accordion>
+
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+
+<Card title="Vector Search Guide" icon="magnifying-glass" href="/features/vector-search">
+  Deep dive into HNSW configuration
+</Card>
+
+<Card title="Transaction Guide" icon="lock" href="/features/transactions">
+  Learn about isolation levels
+</Card>
+
+</CardGroup>

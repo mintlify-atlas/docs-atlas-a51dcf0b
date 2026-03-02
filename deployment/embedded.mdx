@@ -1,0 +1,525 @@
+---
+title: Embedded Deployment
+description: Deploy SochDB as an embedded database within your application
+---
+
+SochDB's embedded mode runs as a ~700KB library directly in your application process, providing SQLite-style simplicity with zero external dependencies.
+
+## Overview
+
+Embedded deployment is ideal for:
+
+- **Desktop applications** with local data persistence
+- **Mobile apps** requiring offline-first capabilities
+- **Edge devices** with resource constraints
+- **Development environments** for rapid prototyping
+- **Single-tenant applications** with co-located data
+
+```
+┌─────────────────────────────────────┐
+│        Your Application             │
+│                                     │
+│  ┌───────────────────────────────┐  │
+│  │      SochDB Embedded          │  │
+│  │  • ~700KB binary              │  │
+│  │  • No external dependencies   │  │
+│  │  • In-process execution       │  │
+│  │  • ACID transactions          │  │
+│  └───────────────────────────────┘  │
+│              ↓                      │
+│  ┌───────────────────────────────┐  │
+│  │    Local Filesystem           │  │
+│  │    ./data/sochdb.db           │  │
+│  └───────────────────────────────┘  │
+└─────────────────────────────────────┘
+```
+
+## Installation
+
+<CodeGroup>
+
+```bash Python
+pip install sochdb
+```
+
+```bash Node.js
+npm install @sochdb/sochdb
+```
+
+```bash Go
+go get github.com/sochdb/sochdb-go@latest
+```
+
+```toml Rust
+# Add to Cargo.toml
+[dependencies]
+sochdb = "0.2"
+```
+
+</CodeGroup>
+
+## Basic Usage
+
+<CodeGroup>
+
+```python Python
+from sochdb import Database
+
+# Open or create database
+db = Database.open("./my_app_data")
+
+# Basic key-value operations
+db.put(b"users/alice", b"Alice Smith")
+value = db.get(b"users/alice")
+print(value.decode())  # "Alice Smith"
+
+# Always close when done
+db.close()
+```
+
+```typescript Node.js
+import { SochDatabase } from '@sochdb/sochdb';
+
+// Open or create database
+const db = new SochDatabase('./my_app_data');
+
+// Basic operations
+await db.put('users/alice', 'Alice Smith');
+const value = await db.get('users/alice');
+console.log(value);  // "Alice Smith"
+
+await db.close();
+```
+
+```go Go
+package main
+
+import (
+    "fmt"
+    sochdb "github.com/sochdb/sochdb-go"
+)
+
+func main() {
+    // Open or create database
+    db, _ := sochdb.Open("./my_app_data")
+    defer db.Close()
+    
+    // Basic operations
+    db.Put([]byte("users/alice"), []byte("Alice Smith"))
+    value, _ := db.Get([]byte("users/alice"))
+    fmt.Println(string(value))  // "Alice Smith"
+}
+```
+
+```rust Rust
+use sochdb::Database;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Open or create database
+    let db = Database::open("./my_app_data")?;
+    
+    // Basic operations
+    db.put(b"users/alice", b"Alice Smith")?;
+    if let Some(value) = db.get(b"users/alice")? {
+        println!("{}", String::from_utf8_lossy(&value));
+    }
+    Ok(())
+}
+```
+
+</CodeGroup>
+
+## Configuration Options
+
+### Connection Configuration
+
+<CodeGroup>
+
+```python Python
+from sochdb import Database, ConnectionConfig, SyncMode
+
+# Custom configuration
+config = ConnectionConfig(
+    data_dir="./app_data",
+    enable_compression=True,
+    sync_mode=SyncMode.NORMAL,  # NORMAL, FULL, OFF
+    max_connections=100,
+    enable_ordered_index=True
+)
+
+db = Database.open_with_config(config)
+```
+
+```rust Rust
+use sochdb::{Database, ConnectionConfig, SyncMode};
+
+let config = ConnectionConfig {
+    data_dir: "./app_data".into(),
+    enable_compression: true,
+    sync_mode: SyncMode::Normal,
+    max_connections: 100,
+    enable_ordered_index: true,
+    ..Default::default()
+};
+
+let db = Database::open_with_config(config)?;
+```
+
+</CodeGroup>
+
+### Durability Presets
+
+SochDB provides pre-configured settings optimized for common use cases:
+
+<CodeGroup>
+
+```python Python
+from sochdb import ConnectionConfig
+
+# High-throughput batch processing
+config = ConnectionConfig.throughput_optimized()
+
+# Low-latency real-time access
+config = ConnectionConfig.latency_optimized()
+
+# Maximum durability (financial/critical data)
+config = ConnectionConfig.max_durability()
+```
+
+```rust Rust
+use sochdb::ConnectionConfig;
+
+// High-throughput batch processing
+let config = ConnectionConfig::throughput_optimized();
+
+// Low-latency real-time access
+let config = ConnectionConfig::latency_optimized();
+
+// Maximum durability
+let config = ConnectionConfig::max_durability();
+```
+
+</CodeGroup>
+
+| Preset | Sync Mode | Group Commit | Best For |
+|--------|-----------|--------------|----------|
+| `throughput_optimized()` | Normal | Large batches | High-volume ingestion |
+| `latency_optimized()` | Full | Small batches | Real-time applications |
+| `max_durability()` | Full | Disabled | Financial/critical data |
+
+### Sync Modes
+
+| Mode | Description | fsync Behavior | Performance | Durability |
+|------|-------------|----------------|-------------|------------|
+| `SyncMode.NORMAL` | Group commit (recommended) | Batched fsync | High | Good |
+| `SyncMode.FULL` | Fsync every commit | Every commit | Lower | Maximum |
+| `SyncMode.OFF` | Periodic fsync | OS-controlled | Highest | Risk of data loss |
+
+<Warning>
+  Use `SyncMode.OFF` only for temporary/cache data where data loss is acceptable.
+</Warning>
+
+## Performance Tuning
+
+### Batch Operations
+
+For bulk inserts, use batch operations to minimize overhead:
+
+```python
+from sochdb import Database
+
+db = Database.open("./my_db")
+
+# Batch insert (4-5x faster than individual inserts)
+result = db.batch() \
+    .max_batch_size(1000) \
+    .auto_commit(True) \
+    .insert("events", [("id", id1), ("data", data1)]) \
+    .insert("events", [("id", id2), ("data", data2)]) \
+    .execute()
+
+print(f"Inserted {result.ops_executed} rows in {result.duration_ms}ms")
+```
+
+### Ordered Index Control
+
+Disable the ordered index for write-heavy workloads:
+
+```python
+from sochdb import ConnectionConfig
+
+# Write-optimized: ~20% faster writes
+config = ConnectionConfig(
+    enable_ordered_index=False  # O(N) scans instead of O(log N)
+)
+
+db = Database.open_with_config(config)
+```
+
+| Mode | Write Speed | Prefix Scan | Use Case |
+|------|-------------|-------------|----------|
+| Ordered index **on** | Baseline | O(log N + K) | Read-heavy, prefix queries |
+| Ordered index **off** | ~20% faster | O(N) | Write-heavy, point lookups |
+
+### Vector Search Configuration
+
+Tune HNSW parameters for your embedding workload:
+
+```python
+from sochdb import VectorIndex, HNSWConfig, DistanceMetric
+
+config = HNSWConfig(
+    m=16,                          # Max connections per layer
+    m_max=32,                      # Max connections at layer 0
+    ef_construction=200,           # Build-time search width
+    ef_search=50,                  # Query-time search width
+    metric=DistanceMetric.COSINE   # Or EUCLIDEAN, DOT_PRODUCT
+)
+
+index = VectorIndex.with_config(config)
+```
+
+### Memory Management
+
+```python
+from sochdb import ConnectionConfig
+
+config = ConnectionConfig(
+    cache_size_mb=512,        # Query cache size
+    write_buffer_mb=128,      # Write buffer size
+    max_open_files=1000       # File descriptor limit
+)
+
+db = Database.open_with_config(config)
+```
+
+## Advanced Features
+
+### Namespace Isolation
+
+Isolate data for multi-tenant applications:
+
+```python
+from sochdb import Database, CollectionConfig, DistanceMetric
+
+db = Database.open("./my_db")
+
+# Create namespace for tenant isolation
+with db.use_namespace("tenant_acme") as ns:
+    # Create vector collection
+    collection = ns.create_collection(
+        CollectionConfig(
+            name="documents",
+            dimension=384,
+            metric=DistanceMetric.COSINE,
+            enable_hybrid_search=True,
+            content_field="text"
+        )
+    )
+    
+    # Hybrid search: vector + keyword with RRF fusion
+    results = collection.hybrid_search(
+        vector=query_embedding,
+        text_query="database performance",
+        k=10,
+        alpha=0.7  # 70% vector, 30% keyword
+    )
+```
+
+### Context Queries for LLMs
+
+Build token-optimized context for LLM prompts:
+
+```python
+from sochdb import Database, ContextQuery, DeduplicationStrategy
+
+db = Database.open("./my_db")
+ns = db.namespace("tenant_acme")
+collection = ns.collection("documents")
+
+# Build context with token budgeting
+context = (
+    ContextQuery(collection)
+    .add_vector_query(query_embedding, weight=0.7)
+    .add_keyword_query("machine learning optimization", weight=0.3)
+    .with_token_budget(4000)  # Fit within model context window
+    .with_min_relevance(0.5)
+    .with_deduplication(DeduplicationStrategy.EXACT)
+    .execute()
+)
+
+print(f"Retrieved {len(context)} chunks using {context.total_tokens} tokens")
+```
+
+### Graph Overlay for Agent Memory
+
+Build conversation graphs for agent memory:
+
+```python
+from sochdb import Database, GraphOverlay
+
+db = Database.open("./my_db")
+graph = GraphOverlay(db, namespace="agent_memory")
+
+# Build conversation graph
+graph.add_node("msg_1", {"role": "user", "content": "What's the weather?"})
+graph.add_node("msg_2", {"role": "assistant", "content": "Let me check..."})
+graph.add_node("msg_3", {"role": "tool", "content": "Sunny, 72°F"})
+
+# Link causal relationships
+graph.add_edge("msg_1", "msg_2", {"type": "triggers"})
+graph.add_edge("msg_2", "msg_3", {"type": "invokes_tool"})
+
+# Traverse conversation history (BFS)
+path = graph.bfs("msg_1", "msg_3")
+print(f"Conversation flow: {' → '.join(path)}")
+```
+
+## Use Cases
+
+### Desktop Application
+
+```python
+# Local-first note-taking app
+from sochdb import Database
+import json
+
+db = Database.open("~/.mynotes/data")
+
+# Store note with vector embedding for semantic search
+note_id = "note_123"
+note_content = "Meeting notes from Q1 planning"
+embedding = get_embedding(note_content)  # Your embedding function
+
+# Store in namespace
+with db.use_namespace("user_notes") as ns:
+    collection = ns.collection("notes")
+    collection.insert(
+        id=note_id,
+        vector=embedding,
+        metadata={"title": "Q1 Planning", "date": "2026-01-15"},
+        content=note_content
+    )
+
+# Semantic search
+query_emb = get_embedding("quarterly planning")
+results = collection.search(query_emb, k=5)
+```
+
+### Mobile App (Offline-First)
+
+```typescript
+import { SochDatabase } from '@sochdb/sochdb';
+
+// Initialize app database
+const db = new SochDatabase('./app-data');
+
+// Sync-first architecture - works offline
+await db.transaction(async (txn) => {
+  // Queue changes for later sync
+  await txn.put('pending_sync/msg_1', JSON.stringify({
+    action: 'create',
+    data: messageData
+  }));
+});
+
+// Process sync queue when online
+const pending = await db.scanPrefix('pending_sync/');
+for (const [key, value] of pending) {
+  await syncToServer(JSON.parse(value));
+  await db.delete(key);
+}
+```
+
+### Edge Device
+
+```rust
+// IoT sensor data aggregation
+use sochdb::{Database, ConnectionConfig};
+
+let config = ConnectionConfig::throughput_optimized()
+    .with_compression(true)  // Save disk space
+    .with_cache_size_mb(64); // Low memory footprint
+
+let db = Database::open_with_config(config)?;
+
+// Batch sensor readings
+for reading in sensor_stream {
+    db.put(
+        format!("sensors/{}/readings/{}", reading.id, reading.timestamp),
+        reading.to_bytes()
+    )?;
+}
+```
+
+## Resource Requirements
+
+### Minimum Requirements
+
+| Resource | Minimum | Recommended |
+|----------|---------|-------------|
+| RAM | 128 MB | 512 MB+ |
+| Disk | ~700 KB (binary) + data | SSD preferred |
+| CPU | Single core | Multi-core for parallel ops |
+
+### Disk Space Estimation
+
+```
+Database size = (Row count × Average row size) × Compression factor
+
+Compression factor:
+- Text data: ~0.3-0.5
+- Embeddings (float32): ~0.7-0.9 (minimal compression)
+- Mixed workload: ~0.5-0.7
+```
+
+## Troubleshooting
+
+### Database Locked
+
+```python
+# Only one process can open the database at a time
+# Use IPC mode for multi-process access
+from sochdb import Database, ConnectionMode
+
+db = Database.open(
+    "./my_db",
+    mode=ConnectionMode.IPC  # Unix socket for multi-process
+)
+```
+
+### Out of Memory
+
+```python
+# Reduce cache size for low-memory environments
+config = ConnectionConfig(
+    cache_size_mb=64,      # Reduce from default 512 MB
+    write_buffer_mb=32     # Reduce from default 128 MB
+)
+```
+
+### Slow Queries
+
+```python
+# Enable query logging
+import logging
+logging.basicConfig(level=logging.DEBUG)
+
+db = Database.open("./my_db")
+db.execute("SELECT * FROM large_table LIMIT 100")  # Shows query plan
+```
+
+<Info>
+  For distributed deployments or multi-process access, see the [Docker Deployment](/deployment/docker) guide.
+</Info>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Docker Deployment" icon="docker" href="/deployment/docker">
+    Deploy SochDB as a gRPC server with monitoring
+  </Card>
+  <Card title="MCP Server" icon="plug" href="/deployment/mcp-server">
+    Connect SochDB to AI assistants via Model Context Protocol
+  </Card>
+</CardGroup>

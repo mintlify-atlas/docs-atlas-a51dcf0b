@@ -1,0 +1,761 @@
+---
+title: 'Context Query'
+description: 'Assemble multi-source context for LLMs with automatic token budgeting, priority-based truncation, and deduplication'
+icon: 'layer-group'
+---
+
+## Overview
+
+Context Query is SochDB's **killer feature** for AI agents. Instead of manually fetching data from multiple sources (user profile, conversation history, vector search results) and stitching them together, you define a **context query** with priorities and token budgets—SochDB assembles everything in one call.
+
+<Note>
+**The Problem**: Building LLM context is tedious:
+- Fetch user profile (DB query)
+- Fetch last 10 messages (DB query)
+- Fetch similar docs (vector search)
+- Concatenate + truncate to fit token budget
+- Handle edge cases (empty results, budget overflow)
+
+**SochDB Solution**: Define sections with priorities, set a token budget, execute once. Done.
+</Note>
+
+## Key Features
+
+- **Multi-Source Fusion**: Combine literal text, DB queries, vector search, and graph traversal
+- **Token Budgeting**: Strict enforcement of context window limits
+- **Priority-Based Truncation**: High-priority sections (system prompt) always included
+- **Deduplication**: Automatic removal of duplicate content across sources
+- **Multiple Formats**: Output as TOON, JSON, Markdown, or plain text
+
+## How It Works
+
+```
+ContextQuery
+    |
+    ▼
+┌───────────────────────────────────────┐
+│  Section 1 (Priority 0): SYSTEM      │ ← Always included
+│  "You are a helpful assistant"        │
+└───────────────────────────────────────┘
+    |
+    ▼
+┌───────────────────────────────────────┐
+│  Section 2 (Priority 1): USER PREFS  │
+│  GET user.profile.{name, preferences} │
+└───────────────────────────────────────┘
+    |
+    ▼
+┌───────────────────────────────────────┐
+│  Section 3 (Priority 2): HISTORY     │
+│  LAST 10 FROM messages                │
+└───────────────────────────────────────┘
+    |
+    ▼
+┌───────────────────────────────────────┐
+│  Section 4 (Priority 3): SEARCH      │
+│  SEARCH documents (vector)            │
+└───────────────────────────────────────┘
+    |
+    ▼
+┌───────────────────────────────────────┐
+│      Token Budget Check (4096)        │
+│  ✓ System: 15 tokens                  │
+│  ✓ User Prefs: 42 tokens              │
+│  ✓ History: 850 tokens                │
+│  ⚠ Search: 3200 tokens → TRUNCATE     │
+└───────────────────────────────────────┘
+    |
+    ▼
+   Final Context (3950 tokens)
+```
+
+## Quick Start
+
+### Python
+
+<CodeGroup>
+```python Basic Context Query
+from sochdb import Database, ContextQueryBuilder, ContextValue
+import numpy as np
+
+db = Database.open("./agent_db")
+collection = db.namespace("production").collection("documents")
+
+# Build context query
+context = (
+    ContextQueryBuilder.new()
+    .for_session("session_123")
+    .with_budget(4096)  # GPT-4 context window
+    
+    # Priority 0: System prompt (highest priority, always included)
+    .literal("SYSTEM", priority=0, text="You are a helpful AI assistant.")
+    
+    # Priority 1: User profile
+    .section("USER", priority=1)
+        .get("user.profile.{name, email, preferences}")
+        .done()
+    
+    # Priority 2: Recent conversation history
+    .section("HISTORY", priority=2)
+        .last(10, "messages")
+        .where_eq("session_id", "session_123")
+        .done()
+    
+    # Priority 3: Relevant documents (vector search)
+    .section("DOCS", priority=3)
+        .search("knowledge_base", "$query_embedding", top_k=5)
+        .min_score(0.7)
+        .done()
+    
+    .execute()
+)
+
+print(f"Context assembled: {context.token_count}/{context.token_budget} tokens")
+print(f"Sections included: {context.included_sections()}")
+print(f"\nContext:\n{context.context}")
+```
+
+```python With Variables
+from sochdb import ContextQueryBuilder, ContextValue
+
+# Set query embedding as variable
+query_embedding = get_embedding("How do I optimize database queries?")
+
+context = (
+    ContextQueryBuilder.new()
+    .for_session("session_456")
+    .with_budget(8192)  # GPT-4-32k
+    
+    # Set variables for use in sections
+    .set_var("query_embedding", ContextValue.Embedding(query_embedding))
+    .set_var("user_name", ContextValue.String("Alice"))
+    
+    .literal("SYSTEM", 0, "You are a helpful assistant.")
+    .variable("GREETING", 1, "user_name")  # Use variable
+    
+    .section("SEARCH", 2)
+        .search("docs", "$query_embedding", 10)  # Use variable
+        .done()
+    
+    .execute()
+)
+```
+
+```python Advanced Truncation Strategies
+from sochdb import ContextQueryBuilder, TruncationStrategy
+
+context = (
+    ContextQueryBuilder.new()
+    .with_budget(4096)
+    .truncation(TruncationStrategy.PROPORTIONAL)  # Truncate all sections proportionally
+    
+    .literal("SYSTEM", 0, "System prompt")
+    .section("HISTORY", 1).last(20, "messages").done()
+    .section("DOCS", 2).search("kb", "$query", 10).done()
+    
+    .execute()
+)
+
+# Or use STRICT mode (fail if budget exceeded)
+context = (
+    ContextQueryBuilder.new()
+    .with_budget(2048)
+    .truncation(TruncationStrategy.STRICT)
+    .literal("SYSTEM", 0, "Very long system prompt..." * 1000)
+    .execute()  # Raises BudgetExceeded error
+)
+```
+</CodeGroup>
+
+### Rust
+
+```rust
+use sochdb::context_query::{
+    ContextQueryBuilder, ContextFormat, TruncationStrategy, ContextValue
+};
+
+let conn = Connection::open("./agent_db")?;
+let collection = conn.namespace("production").collection("documents");
+
+let result = ContextQueryBuilder::new()
+    .for_session("session_123")
+    .with_budget(4096)
+    
+    // System prompt
+    .literal("SYSTEM", -1, "You are a helpful assistant")
+    
+    // User profile
+    .section("USER", 0)
+        .get("user.profile.{name, preferences}")
+        .done()
+    
+    // Recent messages
+    .section("HISTORY", 1)
+        .last(10, "messages")
+        .where_eq("session_id", "session_123")
+        .done()
+    
+    // Vector search
+    .section("DOCS", 2)
+        .search("knowledge_base", "query_embedding", 5)
+        .min_score(0.7)
+        .done()
+    
+    .truncation(TruncationStrategy::TailDrop)
+    .format(ContextFormat::Soch)
+    .execute()?;
+
+println!("Tokens used: {}/{}", result.token_count, result.token_budget);
+println!("Context:\n{}", result.context);
+```
+
+## Section Types
+
+<Tabs>
+  <Tab title="Literal">
+    Static text (e.g., system prompts):
+    ```python
+    .literal("SYSTEM", priority=0, text="You are a helpful AI assistant.")
+    ```
+    
+    **Use case**: System prompts, instructions that never change.
+  </Tab>
+  
+  <Tab title="Variable">
+    Reference a variable set earlier:
+    ```python
+    .set_var("user_name", ContextValue.String("Alice"))
+    .variable("GREETING", priority=1, var_name="user_name")
+    ```
+    
+    **Use case**: Dynamic values (user name, session ID) set at runtime.
+  </Tab>
+  
+  <Tab title="GET (Path)">
+    Fetch data by path:
+    ```python
+    .section("USER", priority=1)
+        .get("user.profile.{name, email, preferences}")
+        .done()
+    ```
+    
+    Supports:
+    - Nested paths: `user.settings.theme`
+    - Field projection: `{name, email}` (only fetch specific fields)
+    
+    **Use case**: User profiles, configuration, structured data.
+  </Tab>
+  
+  <Tab title="LAST (Recent Rows)">
+    Fetch last N rows from a table:
+    ```python
+    .section("HISTORY", priority=2)
+        .last(10, "messages")
+        .where_eq("session_id", session_id)
+        .where_gt("timestamp", cutoff_time)
+        .done()
+    ```
+    
+    Filters:
+    - `.where_eq(field, value)`
+    - `.where_gt(field, value)` / `.where_lt(field, value)`
+    - `.where_like(field, pattern)`
+    
+    **Use case**: Conversation history, recent events, activity logs.
+  </Tab>
+  
+  <Tab title="SEARCH (Vector)">
+    Vector similarity search:
+    ```python
+    .set_var("query_embedding", ContextValue.Embedding(embedding_vector))
+    
+    .section("DOCS", priority=3)
+        .search("knowledge_base", "$query_embedding", top_k=5)
+        .min_score(0.7)
+        .done()
+    ```
+    
+    Options:
+    - `top_k`: Number of results to retrieve
+    - `min_score`: Minimum similarity score (0.0-1.0)
+    
+    **Use case**: Semantic search, RAG retrieval, similar documents.
+  </Tab>
+  
+  <Tab title="SELECT (SQL)">
+    Custom SQL SELECT query:
+    ```python
+    .section("DATA", priority=2)
+        .select(["id", "name", "score"], "users")
+        .where_gt("score", 80)
+        .where_like("name", "A%")
+        .limit(10)
+        .done()
+    ```
+    
+    **Use case**: Custom queries, analytics, aggregations.
+  </Tab>
+</Tabs>
+
+## Token Budgeting
+
+### Truncation Strategies
+
+<Tabs>
+  <Tab title="TailDrop (Default)">
+    Include sections by priority until budget exhausted. Truncate last section if needed.
+    
+    ```python
+    .truncation(TruncationStrategy.TAIL_DROP)
+    ```
+    
+    **Example**:
+    ```
+    Budget: 1000 tokens
+    
+    Section 1 (priority 0): 100 tokens  ✓ Included
+    Section 2 (priority 1): 300 tokens  ✓ Included
+    Section 3 (priority 2): 500 tokens  ✓ Included
+    Section 4 (priority 3): 400 tokens  ⚠ Truncated to 100 tokens
+    
+    Total: 1000 tokens
+    ```
+    
+    **Best for**: Most use cases. Guarantees high-priority content.
+  </Tab>
+  
+  <Tab title="HeadDrop">
+    Drop low-priority sections entirely if budget exceeded.
+    
+    ```python
+    .truncation(TruncationStrategy.HEAD_DROP)
+    ```
+    
+    **Example**:
+    ```
+    Budget: 1000 tokens
+    
+    Section 1 (priority 0): 100 tokens  ✓ Included
+    Section 2 (priority 1): 300 tokens  ✓ Included
+    Section 3 (priority 2): 500 tokens  ✓ Included
+    Section 4 (priority 3): 400 tokens  ✗ Dropped entirely
+    
+    Total: 900 tokens
+    ```
+    
+    **Best for**: When you prefer complete sections over partial content.
+  </Tab>
+  
+  <Tab title="Proportional">
+    Truncate all sections proportionally to fit budget.
+    
+    ```python
+    .truncation(TruncationStrategy.PROPORTIONAL)
+    ```
+    
+    **Example**:
+    ```
+    Budget: 1000 tokens
+    Original total: 1300 tokens
+    Ratio: 1000/1300 = 0.77
+    
+    Section 1: 100 tokens → 77 tokens
+    Section 2: 300 tokens → 231 tokens
+    Section 3: 500 tokens → 385 tokens
+    Section 4: 400 tokens → 308 tokens
+    
+    Total: ~1000 tokens
+    ```
+    
+    **Best for**: When all sections are equally important.
+  </Tab>
+  
+  <Tab title="Strict">
+    Fail if budget exceeded (no truncation).
+    
+    ```python
+    .truncation(TruncationStrategy.STRICT)
+    ```
+    
+    Raises `BudgetExceeded` error if total tokens > budget.
+    
+    **Best for**: Production systems where you want to catch budget issues early.
+  </Tab>
+</Tabs>
+
+### Token Estimation
+
+SochDB uses a fast token estimator based on character count:
+
+```python
+from sochdb.context_query import estimate_tokens
+
+text = "Hello, how are you?"
+tokens = estimate_tokens(text)  # ~5 tokens
+
+print(f"{len(text)} chars → {tokens} tokens")
+```
+
+<Note>
+**Accuracy**: The estimator is ~95% accurate for English text. For production systems with strict token limits, consider using `tiktoken` for exact counts.
+</Note>
+
+## Deduplication
+
+Avoid repeating the same content across sections:
+
+```python
+from sochdb import DeduplicationStrategy
+
+context = (
+    ContextQueryBuilder.new()
+    .with_budget(4096)
+    .with_deduplication(DeduplicationStrategy.EXACT)  # Remove exact duplicates
+    
+    .section("HISTORY", 1).last(10, "messages").done()
+    .section("SEARCH", 2).search("docs", "$query", 10).done()
+    
+    .execute()
+)
+```
+
+### Deduplication Strategies
+
+| Strategy | Behavior | Use Case |
+|----------|----------|----------|
+| `NONE` | No deduplication | Default, when sections don't overlap |
+| `EXACT` | Remove exact text matches | History + search might return same doc |
+| `FUZZY` | Remove similar content (WIP) | Near-duplicates, paraphrases |
+
+## Output Formats
+
+<Tabs>
+  <Tab title="TOON (Default)">
+    SochDB's compact format (67% fewer tokens than JSON):
+    ```python
+    .format(ContextFormat.SOCH)
+    ```
+    
+    Output:
+    ```
+    # Context
+    session: session_123
+    budget: 4096 tokens
+    
+    # SYSTEM
+    You are a helpful assistant.
+    
+    # USER
+    user.profile{name,email,preferences}
+      Alice,alice@example.com,{"theme":"dark"}
+    
+    # HISTORY
+    messages[3]{role,content}
+      user,How do I optimize queries?
+      assistant,Use indexes and analyze query plans.
+      user,Thanks!
+    
+    # DOCS
+    knowledge_base[2]{title,score}
+      Database Indexing,0.92
+      Query Optimization,0.85
+    ```
+  </Tab>
+  
+  <Tab title="JSON">
+    Standard JSON format:
+    ```python
+    .format(ContextFormat.JSON)
+    ```
+    
+    Output:
+    ```json
+    {
+      "session_id": "session_123",
+      "sections": [
+        {
+          "name": "SYSTEM",
+          "content": "You are a helpful assistant."
+        },
+        {
+          "name": "USER",
+          "content": {"name": "Alice", "email": "alice@example.com"}
+        },
+        {
+          "name": "HISTORY",
+          "content": [
+            {"role": "user", "content": "How do I optimize queries?"},
+            {"role": "assistant", "content": "Use indexes..."}
+          ]
+        }
+      ]
+    }
+    ```
+  </Tab>
+  
+  <Tab title="Markdown">
+    Markdown format for LLMs:
+    ```python
+    .format(ContextFormat.MARKDOWN)
+    ```
+    
+    Output:
+    ```markdown
+    # Context
+    
+    **Session**: session_123  
+    **Budget**: 4096 tokens
+    
+    ## SYSTEM
+    
+    You are a helpful assistant.
+    
+    ## USER
+    
+    - **Name**: Alice
+    - **Email**: alice@example.com
+    
+    ## HISTORY
+    
+    | Role | Content |
+    |------|----------|
+    | user | How do I optimize queries? |
+    | assistant | Use indexes and analyze query plans. |
+    ```
+  </Tab>
+  
+  <Tab title="Plain Text">
+    Simple text format:
+    ```python
+    .format(ContextFormat.TEXT)
+    ```
+    
+    Output:
+    ```
+    SYSTEM:
+    You are a helpful assistant.
+    
+    USER:
+    name: Alice
+    email: alice@example.com
+    
+    HISTORY:
+    user: How do I optimize queries?
+    assistant: Use indexes and analyze query plans.
+    ```
+  </Tab>
+</Tabs>
+
+## Use Cases
+
+<AccordionGroup>
+  <Accordion title="RAG Chatbot with Conversation History">
+    ```python
+    from sochdb import ContextQueryBuilder, ContextValue
+    
+    def build_chat_context(session_id, user_query, query_embedding):
+        return (
+            ContextQueryBuilder.new()
+            .for_session(session_id)
+            .with_budget(4096)
+            
+            # System prompt
+            .literal("SYSTEM", 0, 
+                "You are a helpful assistant. Answer based on the provided context.")
+            
+            # User profile
+            .section("USER", 1)
+                .get(f"sessions.{session_id}.user")
+                .done()
+            
+            # Last 10 messages
+            .section("HISTORY", 2)
+                .last(10, "messages")
+                .where_eq("session_id", session_id)
+                .done()
+            
+            # Relevant docs (RAG)
+            .set_var("query_embedding", ContextValue.Embedding(query_embedding))
+            .section("KNOWLEDGE", 3)
+                .search("knowledge_base", "$query_embedding", 5)
+                .min_score(0.7)
+                .done()
+            
+            # Current query
+            .literal("QUERY", 4, f"User: {user_query}")
+            
+            .execute()
+        )
+    
+    # Usage
+    context = build_chat_context(
+        session_id="sess_123",
+        user_query="How do I optimize database queries?",
+        query_embedding=get_embedding("optimize database queries")
+    )
+    
+    response = llm.generate(context.context)
+    ```
+  </Accordion>
+  
+  <Accordion title="Multi-Agent System with Shared Context">
+    ```python
+    # Research agent needs full context
+    research_context = (
+        ContextQueryBuilder.new()
+        .for_agent("research_agent")
+        .with_budget(8192)  # Larger budget for research
+        
+        .literal("SYSTEM", 0, "You are a research agent.")
+        .section("TASK", 1).get("tasks.current").done()
+        .section("SOURCES", 2).search("academic_papers", "$query", 20).done()
+        .section("NOTES", 3).last(50, "research_notes").done()
+        
+        .execute()
+    )
+    
+    # Summary agent needs condensed context
+    summary_context = (
+        ContextQueryBuilder.new()
+        .for_agent("summary_agent")
+        .with_budget(2048)  # Smaller budget for summaries
+        
+        .literal("SYSTEM", 0, "You are a summarization agent.")
+        .section("FINDINGS", 1).last(10, "research_findings").done()
+        
+        .execute()
+    )
+    ```
+  </Accordion>
+  
+  <Accordion title="Customer Support with Ticket History">
+    ```python
+    def build_support_context(user_id, ticket_id, issue_query):
+        return (
+            ContextQueryBuilder.new()
+            .with_budget(4096)
+            
+            # Support agent instructions
+            .literal("SYSTEM", 0,
+                "You are a customer support agent. Be helpful and empathetic.")
+            
+            # Customer info
+            .section("CUSTOMER", 1)
+                .get(f"customers.{user_id}.{{name,tier,subscription}}")
+                .done()
+            
+            # Current ticket
+            .section("TICKET", 2)
+                .get(f"tickets.{ticket_id}")
+                .done()
+            
+            # Previous tickets
+            .section("HISTORY", 3)
+                .last(5, "tickets")
+                .where_eq("user_id", user_id)
+                .where_eq("status", "resolved")
+                .done()
+            
+            # Similar resolved tickets (RAG)
+            .set_var("issue_embedding", ContextValue.Embedding(
+                get_embedding(issue_query)
+            ))
+            .section("SIMILAR", 4)
+                .search("resolved_tickets", "$issue_embedding", 3)
+                .min_score(0.8)
+                .done()
+            
+            .execute()
+        )
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Performance
+
+| Operation | Time | Notes |
+|-----------|------|-------|
+| Section resolution | 0.1-2ms | Per section (DB query) |
+| Token counting | {"<"}0.1ms | Fast character-based estimator |
+| Truncation | {"<"}0.5ms | Binary search for proportional |
+| Total assembly | 1-10ms | Depends on section count |
+
+<Note>
+**Benchmark** (4 sections, 4096 token budget, Apple M1):
+- Section resolution: 3.2ms
+- Token budgeting: 0.2ms
+- Format conversion: 0.1ms
+- **Total: 3.5ms**
+</Note>
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use Priorities" icon="arrow-up-1-9">
+    Lower priority = included first:
+    ```python
+    # Priority 0: Always included
+    .literal("SYSTEM", 0, "System prompt")
+    
+    # Priority 1-2: Important
+    .section("USER", 1).get("user").done()
+    .section("HISTORY", 2).last(10, "msgs").done()
+    
+    # Priority 3+: Nice to have
+    .section("EXTRA", 3).search(...).done()
+    ```
+  </Card>
+  
+  <Card title="Set Realistic Budgets" icon="calculator">
+    Match your LLM's context window:
+    ```python
+    # GPT-4-turbo (128k)
+    .with_budget(120000)
+    
+    # GPT-4 (8k)
+    .with_budget(7500)  # Leave room for response
+    
+    # GPT-3.5 (4k)
+    .with_budget(3500)
+    ```
+  </Card>
+  
+  <Card title="Use Variables" icon="dollar-sign">
+    Avoid re-computing embeddings:
+    ```python
+    # Good: Compute once, reuse
+    embedding = get_embedding(query)
+    .set_var("query", ContextValue.Embedding(embedding))
+    .section("S1", 1).search("c1", "$query", 5).done()
+    .section("S2", 2).search("c2", "$query", 5).done()
+    
+    # Bad: Compute twice
+    # .section("S1", 1).search("c1", get_embedding(query), 5)
+    ```
+  </Card>
+  
+  <Card title="Monitor Token Usage" icon="chart-line">
+    Track utilization for optimization:
+    ```python
+    result = context_query.execute()
+    
+    utilization = result.token_count / result.token_budget
+    if utilization > 0.9:
+        log.warning(f"High token usage: {utilization:.1%}")
+    
+    if result.truncated_sections():
+        log.info(f"Truncated: {result.truncated_sections()}")
+    ```
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Hybrid Search" icon="magnifying-glass" href="/features/hybrid-search">
+    Use hybrid search in context query sections
+  </Card>
+  <Card title="Graph Overlay" icon="diagram-project" href="/features/graph-overlay">
+    Add graph traversal sections to your context
+  </Card>
+</CardGroup>

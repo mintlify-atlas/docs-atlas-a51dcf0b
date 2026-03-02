@@ -1,0 +1,496 @@
+---
+title: 'Rust SDK'
+description: 'Official Rust SDK for SochDB - the core implementation'
+icon: 'rust'
+---
+
+## Overview
+
+The SochDB Rust SDK is the core implementation that powers all language bindings. It provides:
+
+- **Zero-copy operations** with native Rust performance
+- **ACID transactions** with MVCC and snapshot isolation
+- **Vector search** with HNSW indexing
+- **Columnar storage** with projection pushdown
+- **Token-efficient TOON format** (40-66% fewer tokens than JSON)
+- **Path-based access** with O(|path|) resolution
+
+## Installation
+
+Add SochDB to your `Cargo.toml`:
+
+```toml
+[dependencies]
+sochdb = "0.5"
+```
+
+For the latest development version:
+
+```toml
+[dependencies]
+sochdb = { git = "https://github.com/sochdb/sochdb", branch = "main" }
+```
+
+## Basic Usage
+
+### Opening a Database
+
+```rust
+use sochdb::Database;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Open or create a database
+    let db = Database::open("./my_db")?;
+    
+    // Basic operations
+    db.put(b"users/alice", b"Alice Smith")?;
+    
+    if let Some(value) = db.get(b"users/alice")? {
+        println!("{}", String::from_utf8_lossy(&value));  // "Alice Smith"
+    }
+    
+    Ok(())
+}
+```
+
+### Using Connection Types
+
+SochDB provides two connection types:
+
+<CodeGroup>
+
+```rust Durable (Production)
+use sochdb::{Connection, ConnectionConfig};
+
+// Production-grade with WAL durability
+let conn = Connection::open("./data")?;
+
+// Or with custom config
+let config = ConnectionConfig::default()
+    .with_sync_mode(SyncMode::Normal)
+    .with_wal_enabled(true);
+let conn = Connection::open_with_config("./data", config)?;
+```
+
+```rust In-Memory (Testing)
+use sochdb::InMemoryConnection;
+
+// Fast in-memory storage for testing
+let conn = InMemoryConnection::open("./test_data")?;
+
+// Data is not persisted - use only for tests
+```
+
+</CodeGroup>
+
+### Path-Based Access
+
+```rust
+use sochdb::Connection;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let conn = Connection::open("./my_db")?;
+    
+    // Hierarchical key structure
+    conn.put(b"users/alice/name", b"Alice Smith")?;
+    conn.put(b"users/alice/email", b"alice@example.com")?;
+    conn.put(b"users/bob/name", b"Bob Jones")?;
+    
+    // Read by path
+    if let Some(name) = conn.get(b"users/alice/name")? {
+        println!("Alice's name: {}", String::from_utf8_lossy(&name));
+    }
+    
+    // Delete a key
+    conn.delete(b"users/alice/email")?;
+    
+    // Range scanning
+    let users = conn.scan(b"users/")?;
+    for (key, value) in users {
+        println!("{}: {}", 
+            String::from_utf8_lossy(&key),
+            String::from_utf8_lossy(&value)
+        );
+    }
+    
+    Ok(())
+}
+```
+
+## Transactions
+
+### Basic Transactions
+
+```rust
+use sochdb::{Connection, IsolationLevel};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let conn = Connection::open("./my_db")?;
+    
+    // Begin transaction with default isolation (snapshot)
+    let txn = conn.begin()?;
+    
+    conn.put_in_txn(txn, b"counter", b"100")?;
+    conn.put_in_txn(txn, b"updated", b"true")?;
+    
+    // Commit transaction
+    conn.commit(txn)?;
+    
+    Ok(())
+}
+```
+
+### Isolation Levels
+
+```rust
+use sochdb::{Connection, IsolationLevel};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let conn = Connection::open("./my_db")?;
+    
+    // Serializable isolation with SSI
+    let txn = conn.begin_with_isolation(IsolationLevel::Serializable)?;
+    
+    conn.put_in_txn(txn, b"accounts/alice", b"1000")?;
+    conn.put_in_txn(txn, b"accounts/bob", b"500")?;
+    
+    conn.commit(txn)?;
+    
+    Ok(())
+}
+```
+
+### Transaction Rollback
+
+```rust
+use sochdb::Connection;
+
+fn transfer(
+    conn: &Connection,
+    from: &str,
+    to: &str,
+    amount: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let txn = conn.begin()?;
+    
+    // Read current balances
+    let from_key = format!("accounts/{}/balance", from);
+    let to_key = format!("accounts/{}/balance", to);
+    
+    let from_balance: u64 = if let Some(val) = conn.get_in_txn(txn, from_key.as_bytes())? {
+        String::from_utf8_lossy(&val).parse()?
+    } else {
+        0
+    };
+    
+    let to_balance: u64 = if let Some(val) = conn.get_in_txn(txn, to_key.as_bytes())? {
+        String::from_utf8_lossy(&val).parse()?
+    } else {
+        0
+    };
+    
+    // Check sufficient funds
+    if from_balance < amount {
+        conn.rollback(txn)?;
+        return Err("Insufficient funds".into());
+    }
+    
+    // Update balances
+    conn.put_in_txn(txn, from_key.as_bytes(), (from_balance - amount).to_string().as_bytes())?;
+    conn.put_in_txn(txn, to_key.as_bytes(), (to_balance + amount).to_string().as_bytes())?;
+    
+    conn.commit(txn)?;
+    Ok(())
+}
+```
+
+## Vector Search
+
+### Creating a Vector Index
+
+```rust
+use sochdb_index::{HNSWIndex, HNSWConfig, DistanceMetric};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Create index with custom parameters
+    let config = HNSWConfig {
+        m: 16,                          // Max connections per layer
+        m_max: 32,                      // Max connections at layer 0
+        ef_construction: 200,           // Build-time search width
+        ef_search: 50,                  // Query-time search width
+        metric: DistanceMetric::Cosine, // Or Euclidean, DotProduct
+        ..Default::default()
+    };
+    
+    let index = HNSWIndex::with_config(config);
+    
+    Ok(())
+}
+```
+
+### Inserting and Searching Vectors
+
+```rust
+use sochdb::{Connection, VectorCollection, SearchResult};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let conn = Connection::open("./vectors")?;
+    
+    // Insert vectors
+    let embedding: Vec<f32> = get_embedding("Hello world");
+    let metadata = serde_json::json!({
+        "text": "Hello world",
+        "source": "example"
+    });
+    
+    conn.vector_insert("documents", 1, &embedding, Some(metadata))?;
+    
+    // Search similar vectors
+    let query_embedding = get_embedding("Hi there");
+    let results: Vec<SearchResult> = conn.vector_search(
+        "documents", 
+        &query_embedding, 
+        10  // k=10
+    )?;
+    
+    for result in results {
+        println!("ID: {}, Distance: {:.4}", result.id, result.distance);
+    }
+    
+    Ok(())
+}
+
+fn get_embedding(text: &str) -> Vec<f32> {
+    // Use your embedding model here
+    vec![0.1; 768]
+}
+```
+
+### Distance Metrics
+
+```rust
+use sochdb_index::DistanceMetric;
+
+// Choose based on your use case:
+let metric = DistanceMetric::Cosine;      // Text embeddings (normalized)
+let metric = DistanceMetric::Euclidean;   // Spatial data (unnormalized)
+let metric = DistanceMetric::DotProduct;  // Pre-normalized vectors
+```
+
+## Path API
+
+### Path Operations
+
+```rust
+use sochdb::{Connection, PathQuery};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let conn = Connection::open("./data")?;
+    
+    // Put a value at a path
+    conn.put(b"users/1/name", b"Alice")?;
+    conn.put(b"users/1/profile/avatar", b"avatar_data")?;
+    
+    // Get a value
+    let name = conn.get(b"users/1/name")?;
+    
+    // Delete at path
+    conn.delete(b"users/1/profile/avatar")?;
+    
+    // Scan by prefix (returns all matching key-value pairs)
+    let user_data = conn.scan(b"users/1/")?;
+    for (key, value) in user_data {
+        println!("{}: {:?}", String::from_utf8_lossy(&key), value);
+    }
+    
+    Ok(())
+}
+```
+
+### Path Query Builder
+
+```rust
+use sochdb::{PathQuery, Order};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let conn = Connection::open("./data")?;
+    
+    // Query using PathQuery builder
+    let results = PathQuery::from_path(&conn, "users")
+        .select(&["id", "name", "email"])
+        .where_eq("status", "active")
+        .order_by("created_at", Order::Desc)
+        .limit(10)
+        .execute()?;
+    
+    Ok(())
+}
+```
+
+## Context Query Builder
+
+Build LLM context with automatic token budget management:
+
+```rust
+use sochdb::{ContextQueryBuilder, ContextFormat, TruncationStrategy};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let conn = Connection::open("./my_db")?;
+    
+    let context = ContextQueryBuilder::new()
+        .for_session("session_123")
+        .with_budget(4096)  // Token budget
+        
+        // System prompt (highest priority)
+        .literal("SYSTEM", -1, "You are a helpful assistant")
+        
+        // User profile from database
+        .section("USER", 0)
+            .get("user.profile.{name, email, preferences}")
+            .done()
+        
+        // Recent conversation history
+        .section("HISTORY", 1)
+            .last(10, "messages")
+            .where_eq("session_id", "session_123")
+            .done()
+        
+        // Relevant documents via vector search
+        .section("DOCS", 2)
+            .search("knowledge_base", "query_embedding", 5)
+            .min_score(0.7)
+            .done()
+        
+        .truncation(TruncationStrategy::PriorityDrop)
+        .format(ContextFormat::Soch)
+        .execute()?;
+    
+    println!("Tokens used: {}/{}", context.token_count, 4096);
+    println!("Context:\n{}", context.context);
+    
+    Ok(())
+}
+```
+
+## Durability and Sync Modes
+
+### Sync Modes
+
+```rust
+use sochdb::{ConnectionConfig, SyncMode};
+
+// Group commit (recommended)
+let config = ConnectionConfig::default()
+    .with_sync_mode(SyncMode::Normal);
+
+// Fsync every commit (safest)
+let config = ConnectionConfig::default()
+    .with_sync_mode(SyncMode::Full);
+
+// Periodic fsync (fastest)
+let config = ConnectionConfig::default()
+    .with_sync_mode(SyncMode::Off);
+
+let conn = Connection::open_with_config("./data", config)?;
+```
+
+### Durability Presets
+
+```rust
+use sochdb::ConnectionConfig;
+
+// High-throughput batch processing
+let config = ConnectionConfig::throughput_optimized();
+
+// Low-latency real-time access
+let config = ConnectionConfig::latency_optimized();
+
+// Maximum durability (fsync every commit, no batching)
+let config = ConnectionConfig::max_durability();
+
+let conn = Connection::open_with_config("./data", config)?;
+```
+
+## SDK Features
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Basic KV | ✅ | put, get, delete, scan |
+| Transactions | ✅ | ACID with MVCC, SSI |
+| Vector Search | ✅ | HNSW indexing |
+| Path API | ✅ | O(\|path\|) resolution |
+| Context Query | ✅ | Token budgeting for LLMs |
+| Columnar Storage | ✅ | Projection pushdown |
+| TOON Format | ✅ | 40-66% token savings |
+| WAL Durability | ✅ | Crash recovery |
+
+## Architecture
+
+SochDB is built from multiple crates:
+
+| Crate | Description |
+|-------|-------------|
+| `sochdb-core` | Core types and TOON format |
+| `sochdb-kernel` | Database kernel (WAL, MVCC, transactions) |
+| `sochdb-storage` | Storage engine (LSCS columnar, mmap) |
+| `sochdb-index` | Index structures (B-Tree, HNSW) |
+| `sochdb-query` | Query execution and context builder |
+| `sochdb-client` | Client SDK (this crate) |
+
+## External Resources
+
+<CardGroup cols={2}>
+
+<Card title="Source Repository" icon="github" href="https://github.com/sochdb/sochdb">
+  Main SochDB repository
+</Card>
+
+<Card title="Benchmarks" icon="chart-line" href="https://github.com/sochdb/sochdb-benchmarks">
+  Performance comparisons
+</Card>
+
+</CardGroup>
+
+## Performance Tips
+
+<AccordionGroup>
+
+<Accordion title="Use batch operations for bulk inserts">
+  For inserting many key-value pairs, use transactions to batch operations and reduce WAL overhead.
+</Accordion>
+
+<Accordion title="Choose the right sync mode">
+  Use `SyncMode::Normal` (group commit) for most use cases. Use `SyncMode::Full` only when you need maximum durability guarantees.
+</Accordion>
+
+<Accordion title="Leverage columnar storage">
+  When querying, select only the columns you need to benefit from projection pushdown and reduce I/O by up to 80%.
+</Accordion>
+
+<Accordion title="Use TOON format for LLM context">
+  TOON format reduces token usage by 40-66% compared to JSON, allowing you to fit more context within model limits.
+</Accordion>
+
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+
+<Card title="Vector Search Guide" icon="magnifying-glass" href="/features/vector-search">
+  Deep dive into HNSW configuration
+</Card>
+
+<Card title="Transaction Guide" icon="lock" href="/features/transactions">
+  Learn about isolation levels
+</Card>
+
+<Card title="TOON Format" icon="file-code" href="/features/toon-format">
+  Token-efficient serialization
+</Card>
+
+<Card title="Architecture" icon="sitemap" href="/architecture">
+  Understanding SochDB internals
+</Card>
+
+</CardGroup>

@@ -1,0 +1,216 @@
+---
+title: 'Connection'
+description: 'Database connection types and configuration'
+---
+
+## Connection Types
+
+SochDB provides two connection types for different use cases:
+
+| Type | Durability | Use Case |
+|------|-----------|----------|
+| `DurableConnection` | Full WAL + MVCC | **Production** - ACID guarantees |
+| `InMemoryConnection` | In-memory only | Testing - ephemeral data |
+
+### Type Aliases
+
+```rust
+pub type Connection = DurableConnection;  // Default connection
+pub type Database = DurableConnection;    // Alternative alias
+pub type InMemoryConnection = SochConnection;  // For testing
+```
+
+## DurableConnection
+
+Production-grade connection with WAL durability, MVCC transactions, and crash recovery.
+
+### Opening a Connection
+
+```rust
+use sochdb::prelude::*;
+
+// Open with default configuration
+let conn = Connection::open("./data")?;
+
+// Or use DurableConnection explicitly
+let conn = DurableConnection::open("./data")?;
+```
+
+### Configuration
+
+```rust
+pub struct ConnectionConfig {
+    pub token_budget: Option<usize>,
+    pub streaming: bool,
+    pub output_format: OutputFormat,
+    pub pool_size: usize,
+}
+```
+
+**Example:**
+
+```rust
+let config = ConnectionConfig {
+    token_budget: Some(4000),
+    streaming: false,
+    output_format: OutputFormat::Soch,
+    pool_size: 10,
+};
+```
+
+## Core Operations
+
+All connection types implement the `ConnectionTrait` for basic operations:
+
+### put()
+
+Write a key-value pair to storage.
+
+```rust
+pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()>
+```
+
+**Example:**
+
+```rust
+conn.put(b"users/1", b"Alice")?;
+```
+
+### get()
+
+Retrieve a value by key.
+
+```rust
+pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>
+```
+
+**Example:**
+
+```rust
+if let Some(value) = conn.get(b"users/1")? {
+    println!("Found: {:?}", value);
+}
+```
+
+### delete()
+
+Delete a key from storage.
+
+```rust
+pub fn delete(&self, key: &[u8]) -> Result<()>
+```
+
+**Example:**
+
+```rust
+conn.delete(b"users/1")?;
+```
+
+### scan()
+
+Scan keys with a given prefix.
+
+```rust
+pub fn scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>>
+```
+
+**Example:**
+
+```rust
+let results = conn.scan(b"users/")?;
+for (key, value) in results {
+    println!("{:?} -> {:?}", key, value);
+}
+```
+
+## InMemoryConnection
+
+Fast in-memory storage for testing. Data is not persisted.
+
+<Warning>
+**Use only for tests or ephemeral data.** No durability guarantees.
+</Warning>
+
+```rust
+let test_conn = InMemoryConnection::open("./test_data")?;
+```
+
+## Transaction Support
+
+### Isolation Levels
+
+```rust
+pub enum IsolationLevel {
+    SnapshotIsolation,  // Default - MVCC with snapshot isolation
+    Serializable,       // Strict serializability
+    ReadCommitted,      // Read committed isolation
+}
+```
+
+### Beginning Transactions
+
+```rust
+// Default isolation (snapshot)
+let txn = conn.begin()?;
+
+// Custom isolation level
+let txn = conn.begin_with_isolation(IsolationLevel::Serializable)?;
+```
+
+## Statistics
+
+### DurableStats
+
+Connection statistics and metrics:
+
+```rust
+pub struct DurableStats {
+    pub queries_executed: u64,
+    pub soch_tokens_emitted: u64,
+    pub json_tokens_equivalent: u64,
+    pub token_savings_percent: f64,
+    pub cache_hit_rate: f64,
+}
+```
+
+**Example:**
+
+```rust
+let stats = conn.stats();
+println!("Token savings: {:.1}%", stats.token_savings_percent);
+println!("Cache hit rate: {:.1}%", stats.cache_hit_rate);
+```
+
+## Sync Modes
+
+```rust
+pub trait SyncModeClient {
+    fn fsync(&self) -> Result<()>;  // Force fsync to disk
+}
+```
+
+**Example:**
+
+```rust
+conn.put(b"key", b"value")?;
+conn.fsync()?;  // Ensure written to disk
+```
+
+## Error Types
+
+```rust
+pub enum ClientError {
+    Storage(String),
+    Validation(String),
+    NotFound(String),
+    // ... other variants
+}
+
+pub type Result<T> = std::result::Result<T, ClientError>;
+```
+
+## See Also
+
+- [Queries](/api/rust/queries) - Path queries and SQL execution
+- [Batch Operations](/api/rust/batch-operations) - High-throughput writes
+- [Vectors](/api/rust/vectors) - Vector search operations

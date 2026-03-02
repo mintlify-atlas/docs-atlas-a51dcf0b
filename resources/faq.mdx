@@ -1,0 +1,613 @@
+---
+title: 'FAQ'
+description: 'Frequently asked questions about SochDB'
+icon: 'circle-question'
+---
+
+# Frequently Asked Questions
+
+Common questions about SochDB, TOON format, vector search, deployment, and performance.
+
+---
+
+## General Questions
+
+<AccordionGroup>
+  <Accordion title="What is SochDB?" icon="database">
+    SochDB is a **single database** that replaces your vector DB + relational DB + prompt packer stack. It stores structured data, embeddings, and conversation history together—then assembles token-optimized context for your LLM.
+
+    **Key features:**
+    - Embedded-first design (~700KB binary)
+    - ACID transactions with MVCC
+    - Built-in HNSW vector search
+    - TOON format for 40-66% token reduction
+    - Context query builder with token budgeting
+  </Accordion>
+
+  <Accordion title="Who is SochDB for?" icon="users">
+    SochDB is designed for:
+    - **AI/ML Engineers** building RAG pipelines
+    - **Application Developers** needing embedded databases for LLM apps
+    - **Researchers** working on agent memory systems
+    - **Teams** wanting to simplify their AI stack (no separate vector DB + SQL DB)
+
+    If you're building with LLMs and tired of managing multiple databases, SochDB is for you.
+  </Accordion>
+
+  <Accordion title="Is SochDB production-ready?" icon="circle-check">
+    SochDB is **actively used in production** but is still in **0.x releases** (pre-1.0).
+
+    **What's ready:**
+    - ACID transactions, MVCC, WAL durability
+    - Vector search with >98% recall
+    - Python, Node.js, Go, and Rust SDKs
+    - Docker deployment with monitoring
+
+    **What's not ready:**
+    - Distributed mode / replication
+    - Breaking changes may occur between minor versions
+
+    **Recommendation:** Use for new projects, evaluate carefully for critical production workloads.
+  </Accordion>
+
+  <Accordion title="How is SochDB licensed?" icon="scale-balanced">
+    SochDB is licensed under **AGPL-3.0-or-later**.
+
+    **What this means:**
+    - ✅ Free to use, modify, and distribute
+    - ✅ You must share modifications under AGPL-3.0
+    - ✅ If you run SochDB as a network service, you must share your source code
+
+    For commercial licensing options, contact: sushanth@sochdb.dev
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## TOON Format
+
+<AccordionGroup>
+  <Accordion title="What is TOON format?" icon="table">
+    TOON (Tabular Object-Oriented Notation) is SochDB's compact serialization format designed for LLM context windows.
+
+    **Example:**
+    ```text
+    users[3]{id,name,email}:
+    1,Alice,alice@example.com
+    2,Bob,bob@example.com
+    3,Charlie,charlie@example.com
+    ```
+
+    This achieves **67% token reduction** compared to JSON (52 tokens vs 156 tokens).
+  </Accordion>
+
+  <Accordion title="Why not just use JSON?" icon="code">
+    JSON is verbose and wastes tokens:
+
+    **JSON problems:**
+    - Repeated key names in every object
+    - Braces, quotes, commas everywhere
+    - ~2-3× more tokens than TOON
+
+    **TOON advantages:**
+    - Schema declared once (table header)
+    - Values only in rows
+    - 40-66% fewer tokens = more context fits in your prompt
+
+    For LLM applications, token efficiency directly impacts cost and quality.
+  </Accordion>
+
+  <Accordion title="Can I still use JSON?" icon="check">
+    Yes! SochDB supports both:
+
+    ```rust
+    // Get data as TOON
+    let toon = query.execute_toon()?;
+
+    // Get data as standard JSON
+    let json = query.execute_json()?;
+    ```
+
+    Use TOON when feeding to LLMs, use JSON for interop with existing tools.
+  </Accordion>
+
+  <Accordion title="Do LLMs understand TOON format?" icon="brain">
+    Yes! Modern LLMs (GPT-4, Claude, etc.) parse TOON format reliably because:
+
+    1. **Structured format** — clear schema declaration + rows
+    2. **Similar to CSV** — LLMs already trained on tabular data
+    3. **Self-describing** — schema is in the header
+
+    In our benchmarks, LLMs had **zero parsing errors** with TOON format.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Vector Search
+
+<AccordionGroup>
+  <Accordion title="What vector search algorithm does SochDB use?" icon="magnifying-glass">
+    SochDB uses **HNSW (Hierarchical Navigable Small World)** graphs.
+
+    **Why HNSW:**
+    - O(log N) average query time
+    - >98% recall at practical settings
+    - Memory-efficient graph structure
+    - Well-understood algorithm with production usage
+
+    **Configuration:**
+    ```rust
+    let config = HNSWConfig {
+        m: 16,                // Max connections per layer
+        ef_construction: 200, // Build-time search width
+        ef_search: 50,        // Query-time search width
+        metric: DistanceMetric::Cosine,
+        ..Default::default()
+    };
+    ```
+  </Accordion>
+
+  <Accordion title="How does SochDB compare to Pinecone/Chroma/LanceDB?" icon="chart-bar">
+    See our [Benchmarks](/resources/benchmarks) page for detailed comparisons.
+
+    **Quick summary:**
+    - **vs ChromaDB**: 4.7× faster search, 5.6× faster load
+    - **vs LanceDB**: 1.7× faster search, similar recall (HNSW vs IVF_PQ)
+    - **vs Pinecone**: No network latency (embedded), no monthly fees
+
+    **Trade-offs:**
+    - ✅ SochDB is embedded (no network, no infra)
+    - ✅ Single-node simplicity
+    - ❌ No distributed mode (yet)
+    - ❌ No managed cloud offering (yet)
+  </Accordion>
+
+  <Accordion title="What distance metrics are supported?" icon="ruler">
+    SochDB supports three distance metrics:
+
+    | Metric | Use Case | Formula |
+    |--------|----------|----------|
+    | **Cosine** | Text embeddings, normalized vectors | `1 - (a·b)/(‖a‖‖b‖)` |
+    | **Euclidean** | Spatial data, unnormalized | `√Σ(aᵢ-bᵢ)²` |
+    | **DotProduct** | Pre-normalized vectors | `-a·b` |
+
+    **Recommendation:** Use **Cosine** for most text embedding models (OpenAI, Cohere, etc.).
+  </Accordion>
+
+  <Accordion title="Can I use multiple vector indexes?" icon="layer-group">
+    Yes! SochDB supports **multi-vector documents** where each document has multiple embeddings.
+
+    **Example use case:**
+    ```python
+    # Store title, abstract, and content vectors separately
+    collection.insert_multi(
+        id="doc_123",
+        vectors=[title_vec, abstract_vec, content_vec],
+        metadata={"title": "SochDB Guide"},
+        aggregate="max"  # Use max score across chunks
+    )
+    ```
+
+    **Aggregation strategies:**
+    - `max` — Best for chunk-level retrieval
+    - `mean` — Smooths scores across chunks
+    - `weighted` — Custom weights per vector
+  </Accordion>
+
+  <Accordion title="How do I choose HNSW parameters?" icon="sliders">
+    **Quick recommendations:**
+
+    | Use Case | M | ef_construction | ef_search |
+    |----------|---|-----------------|------------|
+    | **Real-time RAG** | 8 | 50 | 50 |
+    | **Balanced** | 16 | 100 | 100 |
+    | **Maximum Quality** | 16 | 200 | 200 |
+    | **Large-scale (10M+)** | 32 | 200 | 100 |
+
+    **Parameter guide:**
+    - **M**: Higher = better recall, more memory
+    - **ef_construction**: Higher = better index quality, slower build
+    - **ef_search**: Higher = better recall, slower search
+
+    See our [Benchmarks](/resources/benchmarks#hnsw-recall-benchmarks) for recall/latency trade-offs.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Deployment
+
+<AccordionGroup>
+  <Accordion title="What are the deployment options?" icon="server">
+    SochDB supports **three deployment modes**:
+
+    <CardGroup cols={3}>
+      <Card title="Embedded" icon="cube">
+        **In-process** FFI
+        
+        Single binary, no network, lowest latency
+      </Card>
+      <Card title="IPC" icon="arrow-right-arrow-left">
+        **Unix sockets**
+        
+        Multi-process, local machine only
+      </Card>
+      <Card title="gRPC" icon="network-wired">
+        **Network service**
+        
+        Remote access, Docker deployment
+      </Card>
+    </CardGroup>
+
+    **Unified connection API:**
+    ```python
+    # Auto-detects mode from URI
+    db = connect("file://./data")              # Embedded
+    db = connect("ipc:///tmp/sochdb.sock")     # IPC
+    db = connect("grpc://localhost:50051")     # gRPC
+    ```
+  </Accordion>
+
+  <Accordion title="Can I run SochDB in Docker?" icon="docker">
+    Yes! SochDB provides a **production-ready Docker image**:
+
+    ```bash
+    # Pull and run from Docker Hub
+    docker pull sushanth53/sochdb:latest
+    docker run -d -p 50051:50051 sushanth53/sochdb:latest
+
+    # Or use docker-compose
+    cd docker
+    docker compose up -d
+    ```
+
+    **Features:**
+    - Production-ready image (159MB)
+    - High availability setup with Traefik
+    - Prometheus + Grafana monitoring
+    - gRPC-Web support via Envoy
+
+    See [docker/README.md](https://github.com/sochdb/sochdb/tree/main/docker) for full documentation.
+  </Accordion>
+
+  <Accordion title="What about cloud/managed hosting?" icon="cloud">
+    **Current status:** SochDB is **local-first** (embedded + IPC + self-hosted gRPC).
+
+    **Cloud roadmap:**
+    - ✅ **Local MVP**: Live and working
+    - 🚧 **SochDB Cloud**: On the way (hosted, managed SochDB with sync)
+
+    If you're interested in a hosted solution, let us know what you need!
+  </Accordion>
+
+  <Accordion title="How do I scale SochDB?" icon="arrow-up-right-dots">
+    **Current scaling options:**
+
+    1. **Vertical scaling** — More RAM/CPU for larger datasets
+    2. **Read replicas** — Use IPC mode with multiple readers
+    3. **Namespace isolation** — Multi-tenancy within single instance
+
+    **Not yet available:**
+    - Distributed mode / clustering
+    - Automatic sharding
+    - Cross-region replication
+
+    **Recommendation:** SochDB currently scales to **10M+ vectors** on a single node. For larger deployments, contact us.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## SDK Differences
+
+<AccordionGroup>
+  <Accordion title="Which SDK should I use?" icon="code">
+    All SDKs share the same core functionality. Choose based on your language:
+
+    | SDK | Best For | Status |
+    |-----|----------|--------|
+    | **Python** | ML/AI workflows, Jupyter notebooks | ✅ Stable |
+    | **Node.js/TypeScript** | Web apps, serverless functions | ✅ Stable |
+    | **Go** | CLI tools, microservices | ✅ Stable |
+    | **Rust** | Systems programming, maximum performance | ✅ Stable |
+
+    All SDKs support: KV ops, transactions, SQL, vector search, namespaces.
+  </Accordion>
+
+  <Accordion title="Are there feature differences between SDKs?" icon="table">
+    **No.** All SDKs have feature parity:
+
+    | Feature | Python | Node.js | Go | Rust |
+    |---------|--------|---------|-----|------|
+    | Basic KV | ✅ | ✅ | ✅ | ✅ |
+    | Transactions | ✅ | ✅ | ✅ | ✅ |
+    | SQL Operations | ✅ | ✅ | ✅ | ✅ |
+    | Vector Search | ✅ | ✅ | ✅ | ✅ |
+    | Namespaces | ✅ | ✅ | ✅ | ✅ |
+    | Hybrid Search | ✅ | ✅ | ✅ | ✅ |
+    | Context Query | ✅ | ✅ | ✅ | ✅ |
+
+    **Performance note:** Rust SDK is fastest (zero FFI overhead), but differences are minimal ({"<"}5%) for most workloads.
+  </Accordion>
+
+  <Accordion title="Can I use multiple SDKs with the same database?" icon="link">
+    **Yes!** All SDKs use the same wire protocol and storage format.
+
+    **Example:**
+    ```bash
+    # Python writes data
+    python scripts/ingest.py
+
+    # Node.js serves API
+    node server.js
+
+    # Go CLI queries data
+    ./sochdb-cli query "SELECT * FROM users"
+    ```
+
+    **Important:** Use the same SochDB version across SDKs to avoid compatibility issues.
+  </Accordion>
+
+  <Accordion title="How do I install the SDKs?" icon="download">
+    <Tabs>
+      <Tab title="Python">
+        ```bash
+        pip install sochdb
+        ```
+      </Tab>
+      <Tab title="Node.js">
+        ```bash
+        npm install @sochdb/sochdb
+        ```
+      </Tab>
+      <Tab title="Go">
+        ```bash
+        go get github.com/sochdb/sochdb-go@latest
+        ```
+      </Tab>
+      <Tab title="Rust">
+        ```toml
+        [dependencies]
+        sochdb = "0.5"
+        ```
+      </Tab>
+    </Tabs>
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Performance
+
+<AccordionGroup>
+  <Accordion title="How fast is SochDB?" icon="gauge-high">
+    See our detailed [Benchmarks](/resources/benchmarks) page.
+
+    **Quick highlights:**
+    - **Vector search**: 3.3ms avg latency (4.7× faster than ChromaDB)
+    - **Insert rate**: ~760k ops/sec (embedded mode with WAL)
+    - **Recall**: {">"}98% @ {"<"}0.5ms latency
+    - **Token reduction**: 40-66% vs JSON
+  </Accordion>
+
+  <Accordion title="What's the bottleneck in RAG systems?" icon="hourglass">
+    **Not the database!** In production RAG systems:
+
+    | Component | Time | % of Total |
+    |-----------|------|------------|
+    | **Embedding API** | 59.5s | **99.7%** |
+    | SochDB Insert | 0.133s | 0.2% |
+    | SochDB Search | 0.046s | 0.1% |
+
+    The embedding API is **333× slower** than SochDB operations. Focus on:
+    - Caching embeddings
+    - Batch embedding generation
+    - Using faster embedding models
+  </Accordion>
+
+  <Accordion title="How much memory does SochDB use?" icon="memory">
+    **Depends on your data:**
+
+    | Component | Memory Usage |
+    |-----------|-------------|
+    | **Database binary** | ~700KB |
+    | **HNSW index (1M vectors, 1536D)** | ~6-12GB (depends on M) |
+    | **Memtable** | 4MB default (configurable) |
+    | **Block cache** | 64MB default (configurable) |
+
+    **Formula for HNSW memory:**
+    ```
+    Memory ≈ num_vectors × dimension × 4 bytes × (1 + M/10)
+    ```
+
+    **Example:**
+    - 100K vectors × 1536D × 4 bytes × 1.6 (M=16) ≈ **1GB**
+  </Accordion>
+
+  <Accordion title="Can I tune performance?" icon="sliders">
+    **Yes!** SochDB provides several tuning knobs:
+
+    **Database config:**
+    ```rust
+    DatabaseConfig {
+        group_commit: true,        // Better throughput
+        sync_mode: SyncMode::Normal, // Balance durability/speed
+        memtable_size: 4MB,        // Larger = fewer flushes
+        block_cache_size: 64MB,    // Larger = better read perf
+        compression: Compression::LZ4, // LZ4 or Zstd
+    }
+    ```
+
+    **HNSW config:**
+    ```rust
+    HNSWConfig {
+        m: 16,                 // Trade-off: recall vs memory
+        ef_construction: 200,  // Trade-off: quality vs build time
+        ef_search: 50,         // Trade-off: recall vs latency
+    }
+    ```
+
+    See [Configuration Reference](https://github.com/sochdb/sochdb#-configuration-reference) for details.
+  </Accordion>
+
+  <Accordion title="How do I monitor performance?" icon="chart-line">
+    **Docker deployment includes Prometheus + Grafana:**
+
+    ```bash
+    cd docker
+    docker compose up -d
+    # Grafana: http://localhost:3000
+    # Prometheus: http://localhost:9090
+    ```
+
+    **Metrics exposed:**
+    - Query latency (p50, p95, p99)
+    - Insert throughput
+    - Memory usage
+    - WAL size
+    - Vector search recall
+
+    For custom monitoring, use the `stats()` API:
+    ```python
+    stats = db.stats()
+    print(f"Queries: {stats.num_queries}")
+    print(f"Inserts: {stats.num_inserts}")
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Error: Database locked" icon="lock">
+    **Cause:** Another process has exclusive lock on the database.
+
+    **Solutions:**
+    1. Check if another SochDB instance is running
+    2. Use read-only connection: `Database.open_read_only(path)`
+    3. Increase lock timeout in config
+    4. Use IPC mode for multi-process access
+
+    ```python
+    # Read-only connection (no lock)
+    db = Database.open_read_only("./data")
+    ```
+  </Accordion>
+
+  <Accordion title="Error: Prefix too short" icon="triangle-exclamation">
+    **Cause:** Scan prefix < 3 bytes (safety check for multi-tenant apps).
+
+    **Solutions:**
+    1. Use longer prefixes (recommended): `scan_prefix("users/")`
+    2. Use unsafe version (be careful): `scan_prefix_unchecked("u/")`
+
+    ```python
+    # Safe (minimum 3 bytes)
+    db.scan_prefix("users/")
+
+    # Unsafe (bypass check)
+    db.scan_prefix_unchecked("u/")
+    ```
+  </Accordion>
+
+  <Accordion title="Low recall in vector search" icon="magnifying-glass">
+    **Possible causes:**
+    1. `ef_search` too low
+    2. Wrong distance metric
+    3. Embeddings not normalized (for Cosine)
+
+    **Solutions:**
+    ```python
+    # Increase ef_search
+    results = index.search(query, k=10, ef_search=200)
+
+    # Normalize embeddings for Cosine
+    import numpy as np
+    embedding = embedding / np.linalg.norm(embedding)
+
+    # Check distance metric matches embedding model
+    index = VectorIndex(metric="cosine")  # For OpenAI, Cohere, etc.
+    ```
+  </Accordion>
+
+  <Accordion title="Slow queries after many inserts" icon="hourglass">
+    **Cause:** WAL growth or memtable overflow.
+
+    **Solutions:**
+    1. Run checkpoint: `db.checkpoint()`
+    2. Enable auto-checkpoint in config
+    3. Increase memtable size
+
+    ```python
+    # Manual checkpoint
+    db.checkpoint()
+
+    # Auto-checkpoint config
+    config = DatabaseConfig(
+        auto_checkpoint_interval_s=300  # Every 5 minutes
+    )
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Community & Support
+
+<AccordionGroup>
+  <Accordion title="How do I report a bug?" icon="bug">
+    Open an issue on [GitHub Issues](https://github.com/sochdb/sochdb/issues) with:
+    - SochDB version
+    - SDK and version
+    - Code to reproduce
+    - Error message
+    - Expected vs actual behavior
+
+    See [SECURITY.md](https://github.com/sochdb/sochdb/blob/main/SECURITY.md) for security vulnerabilities.
+  </Accordion>
+
+  <Accordion title="How do I request a feature?" icon="lightbulb">
+    Open a [feature request](https://github.com/sochdb/sochdb/issues/new?template=feature_request.yml) on GitHub.
+
+    Include:
+    - Use case description
+    - Why existing features don't work
+    - API design proposal (optional)
+  </Accordion>
+
+  <Accordion title="How can I contribute?" icon="code-pull-request">
+    See our [Contributing Guide](/resources/contributing) for:
+    - Development setup
+    - Code style guidelines
+    - Testing requirements
+    - Pull request process
+
+    **First-time contributors:** Look for `good first issue` labels!
+  </Accordion>
+
+  <Accordion title="Where can I get help?" icon="question">
+    <CardGroup cols={2}>
+      <Card title="GitHub Discussions" icon="github" href="https://github.com/sochdb/sochdb/discussions">
+        Questions and ideas
+      </Card>
+      <Card title="GitHub Issues" icon="circle-exclamation" href="https://github.com/sochdb/sochdb/issues">
+        Bug reports
+      </Card>
+      <Card title="Documentation" icon="book" href="/index">
+        Guides and tutorials
+      </Card>
+      <Card title="Discord" icon="discord" href="#">
+        Real-time chat (link in README)
+      </Card>
+    </CardGroup>
+  </Accordion>
+</AccordionGroup>
+
+---
+
+<Note>
+Can't find your question? [Open a discussion](https://github.com/sochdb/sochdb/discussions) or [contact us](mailto:sushanth@sochdb.dev).
+</Note>

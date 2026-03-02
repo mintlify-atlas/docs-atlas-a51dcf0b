@@ -1,122 +1,141 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "SochDB",
+  "theme": "aspen",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#6366f1",
+    "light": "#818cf8",
+    "dark": "#4f46e5"
   },
-  "favicon": "/favicon.svg",
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/sochdb/sochdb"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/sochdb/sochdb"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Get Started",
             "pages": [
-              "index",
+              "introduction",
               "quickstart",
-              "development"
+              "installation"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Core Concepts",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "concepts/architecture",
+              "concepts/toon-format",
+              "concepts/acid-transactions",
+              "concepts/vector-search"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "SDK Guides",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "sdks/python",
+              "sdks/nodejs",
+              "sdks/go",
+              "sdks/rust"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Features",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "features/hybrid-search",
+              "features/graph-overlay",
+              "features/context-query",
+              "features/namespace-isolation",
+              "features/policy-hooks"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/embedded",
+              "deployment/docker",
+              "deployment/mcp-server"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "API Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Python API",
             "pages": [
-              "api-reference/introduction"
+              "api/python/database",
+              "api/python/vector-index",
+              "api/python/graph-overlay",
+              "api/python/transactions"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Rust API",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "api/rust/connection",
+              "api/rust/queries",
+              "api/rust/vectors",
+              "api/rust/batch-operations"
+            ]
+          },
+          {
+            "group": "SQL Reference",
+            "pages": [
+              "api/sql/ddl",
+              "api/sql/dml",
+              "api/sql/queries"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Examples",
+        "groups": [
+          {
+            "group": "Use Cases",
+            "pages": [
+              "examples/rag-system",
+              "examples/agent-memory",
+              "examples/semantic-cache",
+              "examples/multi-tenant"
+            ]
+          },
+          {
+            "group": "Integrations",
+            "pages": [
+              "examples/langgraph",
+              "examples/crewai",
+              "examples/claude-mcp"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Resources",
+        "groups": [
+          {
+            "group": "Additional Resources",
+            "pages": [
+              "resources/benchmarks",
+              "resources/changelog",
+              "resources/contributing",
+              "resources/faq"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

@@ -1,0 +1,368 @@
+---
+title: 'Transactions'
+description: 'ACID transactions with MVCC and Serializable Snapshot Isolation'
+icon: 'rectangle-history'
+---
+
+SochDB provides full ACID transactions with Multi-Version Concurrency Control (MVCC) and Serializable Snapshot Isolation (SSI).
+
+## Transaction Basics
+
+Transactions allow you to group multiple database operations into an atomic unit that either succeeds completely or fails completely.
+
+### Key Guarantees
+
+- **Atomicity**: All operations in a transaction succeed or none do
+- **Consistency**: Database remains in a valid state before and after transactions
+- **Isolation**: Concurrent transactions don't interfere with each other (SSI)
+- **Durability**: Committed transactions are persisted via Write-Ahead Log (WAL)
+
+## Using Transactions
+
+### Context Manager (Recommended)
+
+The easiest way to use transactions is with the context manager:
+
+```python
+from sochdb import Database
+
+db = Database.open("./my_db")
+
+with db.transaction() as txn:
+    db.put(b"key1", b"value1", txn=txn)
+    db.put(b"key2", b"value2", txn=txn)
+    db.put(b"key3", b"value3", txn=txn)
+    # Auto-commit on successful exit
+    # Auto-abort on exception
+```
+
+### Manual Transaction Management
+
+For more control, use manual transaction methods:
+
+```python
+# Start transaction
+txn = db.begin()
+
+try:
+    db.put(b"user:1", b'{"name": "Alice"}', txn=txn)
+    db.put(b"user:2", b'{"name": "Bob"}', txn=txn)
+    
+    # Commit to make changes durable
+    commit_ts = db.commit(txn)
+    print(f"Committed at timestamp {commit_ts}")
+    
+except Exception as e:
+    # Rollback on error
+    db.abort(txn)
+    print(f"Transaction aborted: {e}")
+    raise
+```
+
+## Transaction Methods
+
+### begin()
+
+Start a new transaction.
+
+<ResponseField name="return" type="int">
+  Transaction ID to pass to subsequent operations
+</ResponseField>
+
+```python
+txn_id = db.begin()
+```
+
+### commit()
+
+Commit a transaction, making all writes durable.
+
+<ParamField path="txn" type="int" default="None">
+  Transaction ID from `begin()`. If `None`, commits the current transaction.
+</ParamField>
+
+<ResponseField name="return" type="int">
+  Commit timestamp (monotonically increasing)
+</ResponseField>
+
+```python
+ts = db.commit(txn)
+print(f"Changes committed at {ts}")
+```
+
+### abort()
+
+Abort a transaction, discarding all writes.
+
+<ParamField path="txn" type="int" default="None">
+  Transaction ID from `begin()`. If `None`, aborts the current transaction.
+</ParamField>
+
+```python
+db.abort(txn)
+print("Transaction aborted, no changes made")
+```
+
+## Isolation Levels
+
+SochDB uses **Serializable Snapshot Isolation (SSI)**, which provides:
+
+- **Snapshot isolation**: Each transaction sees a consistent snapshot of the database
+- **Serializable guarantees**: Prevents write skew and other anomalies
+- **No phantom reads**: Range queries are stable within a transaction
+
+### Example: Concurrent Transactions
+
+```python
+import threading
+from sochdb import Database
+
+db = Database.open("./concurrent_db")
+
+# Initialize counter
+db.put(b"counter", b"0")
+
+def increment_counter():
+    """Safely increment counter."""
+    with db.transaction() as txn:
+        # Read current value
+        current = int(db.get(b"counter", txn=txn))
+        
+        # Increment
+        new_value = current + 1
+        
+        # Write back
+        db.put(b"counter", str(new_value).encode(), txn=txn)
+
+# Run 100 concurrent increments
+threads = [threading.Thread(target=increment_counter) for _ in range(100)]
+for t in threads:
+    t.start()
+for t in threads:
+    t.join()
+
+# Counter should be exactly 100 (no lost updates)
+final = int(db.get(b"counter"))
+assert final == 100, f"Expected 100, got {final}"
+print(f"Final counter: {final}")
+```
+
+## Auto-commit Mode
+
+Operations without a `txn` parameter automatically commit:
+
+```python
+# These are auto-committed
+db.put(b"key1", b"value1")  # Implicit transaction + commit
+db.put(b"key2", b"value2")  # Another implicit transaction + commit
+db.delete(b"key1")          # Another implicit transaction + commit
+```
+
+This is convenient for single operations but has higher overhead than batching in explicit transactions.
+
+## Error Handling
+
+### Transaction Conflicts
+
+SSI may detect conflicts and abort transactions:
+
+```python
+try:
+    with db.transaction() as txn:
+        db.put(b"key", b"value", txn=txn)
+        # ... more operations ...
+except IOError as e:
+    if "conflict" in str(e).lower():
+        print("Transaction conflict detected, retry...")
+        # Implement retry logic
+    else:
+        raise
+```
+
+### Automatic Retry
+
+Implement exponential backoff for retries:
+
+```python
+import time
+import random
+
+def transactional_update(db, max_retries=5):
+    """Update with automatic retry on conflicts."""
+    for attempt in range(max_retries):
+        try:
+            with db.transaction() as txn:
+                # Your transactional operations
+                db.put(b"key", b"value", txn=txn)
+                return True
+        except IOError as e:
+            if "conflict" in str(e).lower() and attempt < max_retries - 1:
+                # Exponential backoff
+                delay = (2 ** attempt) * 0.1 + random.uniform(0, 0.1)
+                time.sleep(delay)
+                continue
+            raise
+    return False
+```
+
+## Read-Only Transactions
+
+For consistent multi-key reads, use a transaction:
+
+```python
+# Consistent snapshot of multiple keys
+with db.transaction() as txn:
+    user = db.get(b"user:1", txn=txn)
+    settings = db.get(b"settings:1", txn=txn)
+    
+    # These reads see the same snapshot
+    # even if other transactions are writing
+```
+
+## Batch Operations
+
+Use transactions to batch writes for better performance:
+
+```python
+import json
+
+def bulk_insert_users(db, users):
+    """Insert many users in a single transaction."""
+    with db.transaction() as txn:
+        for user in users:
+            key = f"user:{user['id']}".encode()
+            value = json.dumps(user).encode()
+            db.put(key, value, txn=txn)
+
+# Insert 1000 users with one fsync
+users = [{"id": i, "name": f"User{i}"} for i in range(1000)]
+bulk_insert_users(db, users)
+```
+
+## Transaction State
+
+Access transaction state through the context manager:
+
+```python
+with db.transaction() as txn:
+    print(f"Transaction ID: {txn.id}")
+    
+    db.put(b"key", b"value", txn=txn)
+    
+    # Explicit commit (optional)
+    ts = txn.commit()
+    print(f"Committed at {ts}")
+```
+
+## Complete Example
+
+```python
+import json
+from sochdb import Database
+
+db = Database.open("./bank_db")
+
+# Initialize accounts
+db.put(b"account:alice", json.dumps({"balance": 1000}).encode())
+db.put(b"account:bob", json.dumps({"balance": 500}).encode())
+
+def transfer(from_account, to_account, amount):
+    """Transfer money between accounts atomically."""
+    with db.transaction() as txn:
+        # Read balances
+        from_key = f"account:{from_account}".encode()
+        to_key = f"account:{to_account}".encode()
+        
+        from_data = json.loads(db.get(from_key, txn=txn))
+        to_data = json.loads(db.get(to_key, txn=txn))
+        
+        # Check sufficient funds
+        if from_data["balance"] < amount:
+            raise ValueError("Insufficient funds")
+        
+        # Update balances
+        from_data["balance"] -= amount
+        to_data["balance"] += amount
+        
+        # Write back
+        db.put(from_key, json.dumps(from_data).encode(), txn=txn)
+        db.put(to_key, json.dumps(to_data).encode(), txn=txn)
+        
+        print(f"Transferred ${amount} from {from_account} to {to_account}")
+
+try:
+    # Transfer $200 from Alice to Bob
+    transfer("alice", "bob", 200)
+    
+    # Verify balances
+    alice = json.loads(db.get(b"account:alice"))
+    bob = json.loads(db.get(b"account:bob"))
+    
+    print(f"Alice balance: ${alice['balance']}")
+    print(f"Bob balance: ${bob['balance']}")
+    
+except ValueError as e:
+    print(f"Transfer failed: {e}")
+```
+
+## Performance Tuning
+
+### Configuration Presets
+
+Choose the right config when opening the database:
+
+```python
+# Maximum throughput (batches commits)
+db = Database.open("./db", config="throughput")
+
+# Minimum latency (commits ASAP)
+db = Database.open("./db", config="latency")
+
+# Maximum durability (fsync every commit)
+db = Database.open("./db", config="durable")
+```
+
+### Group Commit
+
+SochDB automatically groups commits when using `"throughput"` config:
+
+```python
+db = Database.open("./db", config="throughput")
+
+# Multiple transactions may be grouped into one fsync
+for i in range(100):
+    with db.transaction() as txn:
+        db.put(f"key{i}".encode(), f"value{i}".encode(), txn=txn)
+    # Commits are batched for better throughput
+```
+
+### Manual Checkpointing
+
+Create checkpoints to truncate the WAL:
+
+```python
+# After large batch operations
+with db.transaction() as txn:
+    for i in range(10000):
+        db.put(f"key{i}".encode(), f"value{i}".encode(), txn=txn)
+
+# Create checkpoint
+seq = db.checkpoint()
+print(f"Checkpoint created at {seq}")
+```
+
+## Best Practices
+
+1. **Use context managers**: Ensures automatic cleanup on exceptions
+2. **Keep transactions short**: Long transactions increase conflict probability
+3. **Batch writes**: Group multiple writes in one transaction to reduce fsync overhead
+4. **Implement retries**: Handle transient conflicts with exponential backoff
+5. **Choose correct config**: Use `"throughput"` for batch workloads, `"latency"` for OLTP
+6. **Checkpoint regularly**: Prevents unbounded WAL growth in write-heavy workloads
+7. **Read-only snapshots**: Use transactions for multi-key consistent reads
+
+## Limitations
+
+- **Single-node only**: No distributed transactions (yet)
+- **No savepoints**: Cannot partially rollback within a transaction
+- **Fixed isolation level**: Always uses Serializable Snapshot Isolation

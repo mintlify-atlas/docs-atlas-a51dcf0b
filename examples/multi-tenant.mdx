@@ -1,0 +1,460 @@
+---
+title: 'Multi-Tenant Architecture'
+description: 'Build secure multi-tenant AI applications with namespace isolation and per-tenant data separation'
+---
+
+## Overview
+
+Multi-tenancy allows multiple organizations to share the same SochDB infrastructure while maintaining complete data isolation. SochDB provides:
+- **Namespace isolation** for logical separation
+- **Access control** with tenant-scoped queries
+- **Per-tenant collections** for complete segregation
+- **Cross-tenant analytics** (when permitted)
+
+## Use Case
+
+A SaaS platform serving multiple companies where:
+- Each company's data must be completely isolated
+- Users can only access their organization's data
+- Different access levels (public, internal, admin)
+- Shared infrastructure for cost efficiency
+
+## Architecture Patterns
+
+### Pattern 1: Tenant ID Filtering
+
+```
+┌─────────────────────────────┐
+│   Shared Vector Index       │
+├─────────────────────────────┤
+│ Doc1 (tenant: acme)         │
+│ Doc2 (tenant: globex)       │
+│ Doc3 (tenant: acme)         │
+│ Doc4 (tenant: initech)      │
+└─────────────────────────────┘
+         │
+         ▼
+    Filter by tenant_id
+```
+
+### Pattern 2: Separate Collections
+
+```
+┌─────────────┐  ┌─────────────┐  ┌─────────────┐
+│   Acme      │  │   Globex    │  │  Initech    │
+│  Collection │  │  Collection │  │  Collection │
+└─────────────┘  └─────────────┘  └─────────────┘
+```
+
+## Complete Implementation
+
+<Steps>
+
+### Install Dependencies
+
+```bash
+pip install sochdb numpy requests
+```
+
+### Create Multi-Tenant System
+
+```python multi_tenant.py
+import os
+import time
+from typing import List, Dict, Optional
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+import numpy as np
+import requests
+
+from sochdb import VectorIndex
+
+@dataclass
+class Document:
+    """Multi-tenant document."""
+    id: str
+    content: str
+    tenant_id: str
+    access_level: int  # 0=public, 1=internal, 2=admin
+    metadata: Dict
+    created_at: datetime
+    embedding: Optional[np.ndarray] = None
+
+@dataclass
+class SearchResult:
+    """Search result with access control."""
+    document: Document
+    score: float
+
+class MultiTenantVectorDB:
+    """
+    Multi-tenant vector database with access control.
+    
+    Features:
+    - Strict tenant isolation
+    - Access level filtering
+    - Per-tenant statistics
+    - Audit logging
+    """
+    
+    def __init__(self, dimension: int = 1536):
+        self.dimension = dimension
+        
+        # Shared index with tenant filtering
+        self.index = VectorIndex(
+            dimension=dimension,
+            max_connections=32,
+            ef_construction=200
+        )
+        
+        self.documents: Dict[str, Document] = {}
+        self.id_to_idx: Dict[str, int] = {}
+        self.idx_to_id: Dict[int, str] = {}
+        self.next_idx = 0
+        
+        # Per-tenant stats
+        self.tenant_stats: Dict[str, Dict] = {}
+    
+    def _embed(self, texts: List[str]) -> np.ndarray:
+        """Generate embeddings (mock for demo)."""
+        embeddings = []
+        for text in texts:
+            np.random.seed(hash(text) % 2**32)
+            emb = np.random.randn(self.dimension).astype(np.float32)
+            emb /= np.linalg.norm(emb)
+            embeddings.append(emb)
+        return np.array(embeddings)
+    
+    def ingest(
+        self,
+        documents: List[Document],
+        tenant_id: str
+    ) -> int:
+        """Ingest documents for a specific tenant."""
+        
+        # Verify tenant ownership
+        for doc in documents:
+            if doc.tenant_id != tenant_id:
+                raise PermissionError(f"Document {doc.id} does not belong to tenant {tenant_id}")
+        
+        # Generate embeddings
+        texts = [d.content for d in documents]
+        embeddings = self._embed(texts)
+        
+        # Insert into shared index
+        start_idx = self.next_idx
+        ids = np.arange(start_idx, start_idx + len(documents), dtype=np.uint64)
+        self.index.insert_batch(ids, embeddings)
+        
+        # Store documents
+        for i, doc in enumerate(documents):
+            doc.embedding = embeddings[i]
+            idx = start_idx + i
+            self.documents[doc.id] = doc
+            self.id_to_idx[doc.id] = idx
+            self.idx_to_id[idx] = doc.id
+        
+        self.next_idx += len(documents)
+        
+        # Update tenant stats
+        if tenant_id not in self.tenant_stats:
+            self.tenant_stats[tenant_id] = {"doc_count": 0, "searches": 0}
+        self.tenant_stats[tenant_id]["doc_count"] += len(documents)
+        
+        return len(documents)
+    
+    def search(
+        self,
+        query: str,
+        tenant_id: str,
+        user_access_level: int = 0,
+        top_k: int = 10,
+        filters: Optional[Dict] = None
+    ) -> List[SearchResult]:
+        """
+        Search with strict tenant isolation.
+        
+        Args:
+            query: Search query
+            tenant_id: Tenant making the request
+            user_access_level: User's access level (0-2)
+            top_k: Number of results
+            filters: Additional metadata filters
+        """
+        
+        query_embedding = self._embed([query])[0]
+        
+        # Over-fetch to account for filtering
+        k_fetch = top_k * 5
+        results = self.index.search(query_embedding, k=k_fetch)
+        
+        search_results = []
+        
+        for idx, score in results:
+            doc_id = self.idx_to_id.get(int(idx))
+            if not doc_id or doc_id not in self.documents:
+                continue
+            
+            doc = self.documents[doc_id]
+            
+            # CRITICAL: Tenant isolation
+            if doc.tenant_id != tenant_id:
+                continue
+            
+            # Access level check
+            if doc.access_level > user_access_level:
+                continue
+            
+            # Additional filters
+            if filters:
+                match = all(
+                    doc.metadata.get(k) == v
+                    for k, v in filters.items()
+                )
+                if not match:
+                    continue
+            
+            search_results.append(SearchResult(
+                document=doc,
+                score=float(score)
+            ))
+            
+            if len(search_results) >= top_k:
+                break
+        
+        # Update stats
+        if tenant_id in self.tenant_stats:
+            self.tenant_stats[tenant_id]["searches"] += 1
+        
+        return search_results
+    
+    def get_tenant_stats(self, tenant_id: str) -> Dict:
+        """Get statistics for a tenant."""
+        return self.tenant_stats.get(tenant_id, {})
+    
+    def delete_tenant_data(self, tenant_id: str) -> int:
+        """Delete all data for a tenant (GDPR compliance)."""
+        to_delete = [
+            doc_id for doc_id, doc in self.documents.items()
+            if doc.tenant_id == tenant_id
+        ]
+        
+        for doc_id in to_delete:
+            del self.documents[doc_id]
+        
+        # Reset stats
+        if tenant_id in self.tenant_stats:
+            del self.tenant_stats[tenant_id]
+        
+        return len(to_delete)
+
+def main():
+    print("Multi-Tenant Vector Database Demo")
+    print("="*60)
+    
+    # Initialize database
+    db = MultiTenantVectorDB(dimension=1536)
+    
+    # Create documents for different tenants
+    tenants = ["acme_corp", "globex_inc", "initech"]
+    
+    for tenant_id in tenants:
+        documents = [
+            Document(
+                id=f"{tenant_id}_doc_1",
+                content=f"[{tenant_id}] Product documentation for authentication",
+                tenant_id=tenant_id,
+                access_level=0,  # Public
+                metadata={"category": "docs", "product": "auth"},
+                created_at=datetime.now()
+            ),
+            Document(
+                id=f"{tenant_id}_doc_2",
+                content=f"[{tenant_id}] Internal billing procedures",
+                tenant_id=tenant_id,
+                access_level=1,  # Internal
+                metadata={"category": "docs", "product": "billing"},
+                created_at=datetime.now()
+            ),
+            Document(
+                id=f"{tenant_id}_doc_3",
+                content=f"[{tenant_id}] Admin security configuration",
+                tenant_id=tenant_id,
+                access_level=2,  # Admin
+                metadata={"category": "config", "product": "security"},
+                created_at=datetime.now()
+            )
+        ]
+        
+        count = db.ingest(documents, tenant_id=tenant_id)
+        print(f"\nIngested {count} documents for {tenant_id}")
+    
+    # Test searches with tenant isolation
+    print("\n" + "="*60)
+    print("Testing Tenant Isolation")
+    print("="*60)
+    
+    test_cases = [
+        {
+            "tenant": "acme_corp",
+            "query": "authentication docs",
+            "access_level": 0,
+            "expected": "Should only see acme_corp docs"
+        },
+        {
+            "tenant": "globex_inc",
+            "query": "billing procedures",
+            "access_level": 1,
+            "expected": "Should see globex_inc internal docs"
+        },
+        {
+            "tenant": "initech",
+            "query": "security",
+            "access_level": 2,
+            "expected": "Should see initech admin docs"
+        }
+    ]
+    
+    for test in test_cases:
+        print(f"\n[{test['tenant']}] Query: {test['query']}")
+        print(f"Access Level: {test['access_level']}")
+        
+        results = db.search(
+            query=test['query'],
+            tenant_id=test['tenant'],
+            user_access_level=test['access_level'],
+            top_k=5
+        )
+        
+        print(f"Results: {len(results)}")
+        for i, result in enumerate(results[:3], 1):
+            print(f"  {i}. [{result.score:.3f}] {result.document.content}")
+            # Verify tenant isolation
+            assert result.document.tenant_id == test['tenant'], "TENANT ISOLATION VIOLATED!"
+        
+        print(f"✓ {test['expected']}")
+    
+    # Show tenant statistics
+    print("\n" + "="*60)
+    print("Tenant Statistics")
+    print("="*60)
+    
+    for tenant_id in tenants:
+        stats = db.get_tenant_stats(tenant_id)
+        print(f"\n{tenant_id}:")
+        print(f"  Documents: {stats.get('doc_count', 0)}")
+        print(f"  Searches:  {stats.get('searches', 0)}")
+    
+    print("\n✓ Multi-tenant demo complete!")
+
+if __name__ == "__main__":
+    main()
+```
+
+### Run the Demo
+
+```bash
+python multi_tenant.py
+```
+
+</Steps>
+
+## Security Best Practices
+
+### Always Filter by Tenant ID
+
+```python
+# CRITICAL: Never skip tenant check
+if doc.tenant_id != tenant_id:
+    continue  # Prevent data leakage
+```
+
+### Access Level Hierarchy
+
+```python
+# 0 = Public (everyone)
+# 1 = Internal (employees)
+# 2 = Admin (administrators)
+
+if doc.access_level > user_access_level:
+    continue  # User lacks permission
+```
+
+### Audit Logging
+
+```python
+class AuditLog:
+    def log_search(self, tenant_id: str, user_id: str, query: str, result_count: int):
+        log_entry = {
+            "timestamp": time.time(),
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "query": query,
+            "result_count": result_count
+        }
+        # Store in SochDB KV
+        self.db.put(f"audit/{tenant_id}/{timestamp}", json.dumps(log_entry))
+```
+
+### GDPR Compliance
+
+```python
+def delete_tenant_data(tenant_id: str):
+    """Complete data deletion for GDPR compliance."""
+    # Delete documents
+    deleted_docs = db.delete_tenant_data(tenant_id)
+    
+    # Delete audit logs
+    # Delete embeddings
+    # Delete user preferences
+    
+    return {"deleted_documents": deleted_docs}
+```
+
+## Alternative: Separate Collections
+
+For complete isolation, use separate vector indexes per tenant:
+
+```python
+class MultiTenantDB:
+    def __init__(self):
+        self.tenant_indexes: Dict[str, VectorIndex] = {}
+    
+    def get_index(self, tenant_id: str) -> VectorIndex:
+        if tenant_id not in self.tenant_indexes:
+            self.tenant_indexes[tenant_id] = VectorIndex(
+                dimension=1536,
+                max_connections=32,
+                ef_construction=200
+            )
+        return self.tenant_indexes[tenant_id]
+    
+    def search(self, query: str, tenant_id: str, top_k: int = 10):
+        index = self.get_index(tenant_id)
+        # No filtering needed - physically isolated
+        return index.search(query_embedding, k=top_k)
+```
+
+## Performance Considerations
+
+| Pattern | Pros | Cons |
+|---------|------|------|
+| **Tenant ID Filtering** | Shared resources, lower overhead | Filtering adds latency |
+| **Separate Collections** | Complete isolation, no filtering | More memory/CPU |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="RAG System" href="/examples/rag-system" icon="magnifying-glass">
+    Add RAG to multi-tenant apps
+  </Card>
+  <Card title="Semantic Cache" href="/examples/semantic-cache" icon="database">
+    Per-tenant caching
+  </Card>
+  <Card title="Agent Memory" href="/examples/agent-memory" icon="brain">
+    Multi-tenant agent memory
+  </Card>
+  <Card title="LangGraph" href="/examples/langgraph" icon="diagram-project">
+    Multi-tenant workflows
+  </Card>
+</CardGroup>

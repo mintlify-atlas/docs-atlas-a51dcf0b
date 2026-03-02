@@ -1,0 +1,373 @@
+---
+title: 'Vectors'
+description: 'Vector search with HNSW and Vamana backends'
+---
+
+## VectorCollection
+
+Scale-aware vector collection that automatically selects the optimal backend based on collection size.
+
+### Backend Selection
+
+| Scale | Backend | Memory/Vector | Search Time |
+|-------|---------|---------------|-------------|
+| {"<"}100K | HNSW | 1536 bytes | {"<"}1ms |
+| 100K+ | Vamana+PQ | 48 bytes | 1-5ms |
+
+### Creating Collections
+
+```rust
+use sochdb::prelude::*;
+
+let conn = Connection::open("./data")?;
+
+// Create with dimension
+let mut coll = VectorCollection::create(&conn, "embeddings", 768)?;
+
+// Or open existing
+let coll = VectorCollection::open(&conn, "embeddings")?;
+```
+
+## Adding Vectors
+
+### add()
+
+Add multiple vectors at once:
+
+```rust
+pub fn add(&mut self, ids: &[&str], vectors: &[Vec<f32>]) -> Result<()>
+```
+
+**Example:**
+
+```rust
+let ids = ["doc1", "doc2", "doc3"];
+let vectors = vec![
+    vec![0.1; 768],
+    vec![0.2; 768],
+    vec![0.3; 768],
+];
+
+coll.add(&ids, &vectors)?;
+```
+
+### add_one()
+
+Add a single vector:
+
+```rust
+pub fn add_one(&mut self, id: &str, vector: Vec<f32>) -> Result<()>
+```
+
+**Example:**
+
+```rust
+let embedding = vec![0.5; 768];
+coll.add_one("doc4", embedding)?;
+```
+
+## Searching Vectors
+
+### search()
+
+Find k-nearest neighbors:
+
+```rust
+pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<SearchResult>>
+```
+
+**Example:**
+
+```rust
+let query = vec![0.15; 768];
+let results = coll.search(&query, 10)?;
+
+for result in results {
+    println!("{}: distance={}", result.id, result.distance);
+}
+```
+
+### SearchResult
+
+```rust
+pub struct SearchResult {
+    pub id: String,           // Vector ID
+    pub distance: f32,        // Euclidean distance
+    pub metadata: Option<HashMap<String, SochValue>>,
+}
+```
+
+**Example with metadata:**
+
+```rust
+for result in results {
+    println!("ID: {}", result.id);
+    println!("Distance: {:.4}", result.distance);
+    
+    if let Some(meta) = result.metadata {
+        println!("Metadata: {:?}", meta);
+    }
+}
+```
+
+## Product Quantization (PQ)
+
+Memory-efficient vector compression for large collections.
+
+### Compression Ratio
+
+For 768-dimensional vectors:
+- Original: 768 × 4 = 3,072 bytes
+- PQ (M=96, k=256): 96 bytes
+- **32x compression**
+
+### train_pq()
+
+Train the Product Quantizer on existing vectors:
+
+```rust
+pub fn train_pq(&mut self) -> Result<()>
+```
+
+<Note>
+Requires at least 1,000 vectors for good results.
+</Note>
+
+**Example:**
+
+```rust
+// Add training vectors
+for i in 0..1500 {
+    let vec = generate_embedding();  // Your embedding generation
+    coll.add_one(&format!("doc{}", i), vec)?;
+}
+
+// Train PQ for compression
+coll.train_pq()?;
+
+if coll.is_pq_trained() {
+    println!("Compression ratio: {:.1}x", coll.compression_ratio().unwrap());
+}
+```
+
+### ProductQuantizer
+
+Low-level PQ implementation:
+
+```rust
+pub struct ProductQuantizer {
+    m: usize,          // Number of subspaces
+    k: usize,          // Centroids per subspace
+    d_sub: usize,      // Dimensions per subspace
+    dimension: usize,  // Total dimension
+    // ...
+}
+```
+
+**Creating a quantizer:**
+
+```rust
+// Default parameters (optimized for LLM embeddings)
+let mut pq = ProductQuantizer::new_default(768);
+
+// Custom parameters
+let mut pq = ProductQuantizer::new(
+    768,   // dimension
+    96,    // subspaces
+    256    // centroids per subspace
+);
+
+// Train on vectors
+pq.train(&training_vectors, 20)?;  // 20 k-means iterations
+
+// Encode vector to PQ codes (96 bytes)
+let code = pq.encode(&vector);
+
+// Decode back to approximate vector
+let approx = pq.decode(&code);
+```
+
+## Distance Metrics
+
+Currently supports Euclidean distance (L2):
+
+```rust
+fn euclidean_distance(a: &[f32], b: &[f32]) -> f32
+```
+
+Uses SIMD-accelerated implementation:
+- **~8x faster** than scalar on AVX2
+- 768-dim: ~288 cycles vs 2304 cycles
+
+## Gradual Migration
+
+When a collection exceeds 100K vectors, SochDB automatically migrates from HNSW to Vamana+PQ:
+
+### Migration Process
+
+1. **Hybrid Mode**: New vectors written to both backends
+2. **Batch Migration**: Old vectors migrated in chunks (default: 1000)
+3. **Intelligent Routing**: Queries use optimal backend during migration
+4. **Finalization**: HNSW deallocated when complete
+
+### migrate_batch()
+
+Manually trigger batch migration:
+
+```rust
+pub fn migrate_batch(&mut self) -> Result<usize>
+```
+
+**Example:**
+
+```rust
+// During idle time, migrate a batch
+let migrated = coll.migrate_batch()?;
+println!("Migrated {} vectors", migrated);
+```
+
+## Collection Management
+
+### get()
+
+Retrieve vector by ID:
+
+```rust
+pub fn get(&self, id: &str) -> Option<Vec<f32>>
+```
+
+**Example:**
+
+```rust
+if let Some(vec) = coll.get("doc1") {
+    println!("Vector dimension: {}", vec.len());
+}
+```
+
+### delete()
+
+Delete vector by ID:
+
+```rust
+pub fn delete(&mut self, id: &str) -> Result<bool>
+```
+
+**Example:**
+
+```rust
+if coll.delete("doc1")? {
+    println!("Deleted doc1");
+} else {
+    println!("doc1 not found");
+}
+```
+
+### stats()
+
+Get collection statistics:
+
+```rust
+pub struct VectorStats {
+    pub count: usize,
+    pub dimension: usize,
+    pub backend: String,
+    pub memory_bytes: usize,
+    pub pq_enabled: bool,
+    pub migration_progress: Option<u8>,  // 0-100%
+}
+```
+
+**Example:**
+
+```rust
+let stats = coll.stats();
+println!("Vectors: {}", stats.count);
+println!("Backend: {}", stats.backend);
+println!("Memory: {:.2} MB", stats.memory_bytes as f64 / 1_000_000.0);
+
+if let Some(progress) = stats.migration_progress {
+    println!("Migration: {}% complete", progress);
+}
+```
+
+## HNSW Configuration
+
+For collections under 100K vectors, HNSW provides fast in-memory search.
+
+### Performance Characteristics
+
+- **Construction**: O(N log N) with randomized level selection
+- **Search**: O(log N) on average
+- **Memory**: ~1.5KB per vector (for 384-dim embeddings)
+
+## Vamana Configuration
+
+For collections over 100K vectors, Vamana+PQ provides memory-efficient search.
+
+### Parameters
+
+```rust
+const VAMANA_THRESHOLD: usize = 100_000;  // Auto-switch threshold
+const DEFAULT_PQ_SUBSPACES: usize = 8;    // Subspaces for PQ
+const DEFAULT_PQ_CENTROIDS: usize = 256;  // Centroids per subspace
+```
+
+### Asymmetric Distance Computation (ADC)
+
+Vamana uses ADC for efficient search:
+
+1. **Precompute** distance table: O(k × D)
+2. **Compute** approximate distances: O(M) per vector
+3. **Rerank** top candidates with exact distances
+
+**Example internal flow:**
+
+```rust
+// Precompute distance table
+let table = pq.compute_distance_table(&query);  // O(k × D)
+
+// Score all vectors using ADC
+let mut candidates: Vec<(usize, f32)> = pq_codes
+    .iter()
+    .enumerate()
+    .map(|(i, code)| (i, pq.asymmetric_distance(&table, code)))  // O(M)
+    .collect();
+
+// Rerank top candidates
+candidates.sort();
+let top_k = rerank_with_exact_distance(&candidates[..rerank_count]);
+```
+
+## Error Handling
+
+```rust
+pub enum ClientError {
+    Validation(String),  // Dimension mismatch, etc.
+    Storage(String),     // I/O errors
+    NotFound(String),    // Collection not found
+}
+```
+
+**Example:**
+
+```rust
+match coll.search(&query, 10) {
+    Ok(results) => {
+        for r in results {
+            println!("{}: {}", r.id, r.distance);
+        }
+    }
+    Err(ClientError::Validation(msg)) => {
+        eprintln!("Validation error: {}", msg);
+    }
+    Err(e) => {
+        eprintln!("Error: {:?}", e);
+    }
+}
+```
+
+## See Also
+
+- [Connection](/api/rust/connection) - Database connections
+- [Queries](/api/rust/queries) - Path and SQL queries
+- [Batch Operations](/api/rust/batch-operations) - Bulk operations

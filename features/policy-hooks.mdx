@@ -1,0 +1,658 @@
+---
+title: 'Policy Hooks'
+description: 'Enforce access control, rate limits, and audit logging with declarative policy rules'
+icon: 'gavel'
+---
+
+## Overview
+
+Policy Hooks provide a **trigger system** for enforcing safety rules on database operations. Define policies that run before/after reads, writes, and deletes to block dangerous operations, redact sensitive data, enforce rate limits, and maintain audit trails.
+
+<Note>
+**Why Policy Hooks?** AI agents need guardrails. Policy hooks let you enforce rules like "agents can't write to system keys" or "redact PII from read operations" without changing agent code.
+</Note>
+
+## Key Features
+
+- **Pre/Post Hooks**: Trigger policies before or after operations
+- **Pattern Matching**: Apply policies to specific key patterns (glob-style)
+- **Policy Actions**: Allow, Deny, Modify, or Log operations
+- **Rate Limiting**: Token bucket rate limiter per agent/session
+- **Audit Logging**: Automatic operation tracking with timestamps
+- **Deterministic Conflict Resolution**: Policies compose via semilattice join (Deny > Modify > Allow)
+
+## Storage Model
+
+Policies are evaluated **in-memory** before database operations:
+
+```
+Agent Request
+    |
+    ▼
+┌─────────────────────┐
+│  Policy Engine      │
+│  ├─ Before Hooks    │
+│  ├─ Rate Limiters   │
+│  └─ Audit Logger    │
+└──────┬──────────────┘
+       │
+       ▼ (if allowed)
+┌─────────────────────┐
+│  SochDB Storage     │
+└──────┬──────────────┘
+       │
+       ▼
+┌─────────────────────┐
+│  After Hooks        │
+│  └─ Redaction       │
+└─────────────────────┘
+```
+
+## Quick Start
+
+### Python
+
+<CodeGroup>
+```python Basic Policy Setup
+from sochdb import Connection, PolicyEngine, PolicyContext
+
+db = Connection.open("./agent_db")
+policy = PolicyEngine(db)
+
+# 1. Block writes to system keys
+policy.before_write("system/*", lambda ctx: (
+    PolicyAction.Deny if ctx.agent_id else PolicyAction.Allow
+))
+
+# 2. Redact sensitive data on read
+policy.after_read("users/*/email", lambda ctx: (
+    PolicyAction.Modify(b"[REDACTED]") if ctx.get("redact_pii") else PolicyAction.Allow
+))
+
+# 3. Rate limit writes per agent
+policy.add_rate_limit("write", max_per_minute=100, scope="agent_id")
+
+# 4. Enable audit logging
+policy.enable_audit()
+
+# Use policy-wrapped operations
+ctx = PolicyContext.new("write", b"users/alice").with_agent_id("agent_123")
+result = policy.put(b"users/alice", b"data", context=ctx)
+```
+
+```python Pre-built Policy Helpers
+from sochdb import PolicyEngine, deny_all, require_agent_id, redact_value
+
+policy = PolicyEngine(db)
+
+# Block all access to admin keys
+policy.before_read("admin/*", deny_all())
+policy.before_write("admin/*", deny_all())
+
+# Require agent_id for all operations
+policy.before_write("*", require_agent_id())
+
+# Redact specific fields
+policy.after_read("users/*/ssn", redact_value(b"***-**-****"))
+policy.after_read("users/*/credit_card", redact_value(b"XXXX-XXXX-XXXX-XXXX"))
+```
+
+```python Advanced: Compiled Policy Sets
+from sochdb import CompiledPolicySet, PolicyRule, PolicyTrigger, PolicyOutcome
+
+# Create compiled policy set (faster evaluation)
+policy_set = CompiledPolicySet.new()
+
+# Add rules
+policy_set.add_rule(
+    PolicyRule(
+        id="block_system_writes",
+        description="Prevent agents from modifying system config",
+        trigger=PolicyTrigger.BeforeWrite,
+        pattern="system/*",
+        priority=100,  # High priority
+        namespace=None,  # All namespaces
+        outcome=PolicyOutcome.Deny
+    ),
+    handler=None  # Static outcome, no handler needed
+)
+
+policy_set.add_rule(
+    PolicyRule(
+        id="redact_emails",
+        description="Redact email addresses from reads",
+        trigger=PolicyTrigger.AfterRead,
+        pattern="users/*/email",
+        priority=50,
+        namespace=None,
+        outcome=PolicyOutcome.Modify
+    ),
+    handler=lambda ctx: PolicyAction.Modify(b"[REDACTED@example.com]")
+)
+
+# Evaluate policies
+ctx = PolicyContext.new("write", b"system/config")
+result = policy_set.evaluate(PolicyTrigger.BeforeWrite, ctx)
+
+if result.is_allowed():
+    db.put(b"system/config", value)
+else:
+    print(f"Blocked by rules: {result.applied_rules}")
+```
+</CodeGroup>
+
+### Rust
+
+```rust
+use sochdb::policy::{
+    PolicyEngine, PolicyAction, PolicyContext, PolicyTrigger
+};
+use sochdb::Connection;
+
+let db = Connection::open("./agent_db")?;
+let policy = PolicyEngine::new(db);
+
+// Block writes to system keys from agents
+policy.before_write("system/*", |ctx| {
+    if ctx.agent_id.is_some() {
+        PolicyAction::Deny
+    } else {
+        PolicyAction::Allow
+    }
+});
+
+// Redact sensitive data
+policy.after_read("users/*/email", |ctx| {
+    if ctx.custom.get("redact_pii").is_some() {
+        PolicyAction::Modify(b"[REDACTED]".to_vec())
+    } else {
+        PolicyAction::Allow
+    }
+});
+
+// Add rate limit
+policy.add_rate_limit("write", 100, "agent_id");
+
+// Use policy-wrapped operations
+let ctx = PolicyContext::new("write", b"users/alice")
+    .with_agent_id("agent_123");
+
+policy.put(b"users/alice", b"data", Some(&ctx))?;
+```
+
+## Policy Triggers
+
+<Tabs>
+  <Tab title="BeforeRead">
+    Run before a read operation (can block):
+    ```python
+    policy.before_read("secrets/*", lambda ctx: (
+        PolicyAction.Allow if ctx.agent_id == "admin_agent" else PolicyAction.Deny
+    ))
+    ```
+    
+    **Use case**: Access control, authentication checks
+  </Tab>
+  
+  <Tab title="AfterRead">
+    Run after a read operation (can modify):
+    ```python
+    policy.after_read("users/*/email", lambda ctx: (
+        PolicyAction.Modify(b"redacted@example.com")
+        if ctx.get("redact_pii") == "true"
+        else PolicyAction.Allow
+    ))
+    ```
+    
+    **Use case**: Data redaction, field masking, PII protection
+  </Tab>
+  
+  <Tab title="BeforeWrite">
+    Run before a write operation (can block or modify):
+    ```python
+    policy.before_write("config/*", lambda ctx: (
+        PolicyAction.Deny if ctx.agent_id else PolicyAction.Allow
+    ))
+    ```
+    
+    **Use case**: Prevent unauthorized writes, validate data
+  </Tab>
+  
+  <Tab title="AfterWrite">
+    Run after a write operation (logging only):
+    ```python
+    policy.after_write("audit/*", lambda ctx: (
+        PolicyAction.Log  # Always logs, doesn't block
+    ))
+    ```
+    
+    **Use case**: Audit logging, event triggers
+  </Tab>
+  
+  <Tab title="BeforeDelete">
+    Run before a delete operation (can block):
+    ```python
+    policy.before_delete("important/*", lambda ctx: (
+        PolicyAction.Deny  # Never allow deletion
+    ))
+    ```
+    
+    **Use case**: Protect critical data, soft deletes
+  </Tab>
+</Tabs>
+
+## Policy Actions
+
+| Action | Behavior | Use Case |
+|--------|----------|----------|
+| `Allow` | Allow the operation | Default, no restrictions |
+| `Deny` | Block the operation | Access control, safety checks |
+| `Modify(data)` | Allow with modified data | Redaction, transformation |
+| `Log` | Allow but log the operation | Audit trails, monitoring |
+
+### Action Precedence (Semilattice Join)
+
+When multiple policies match, actions are combined using a **semilattice join**:
+
+```
+Deny > Modify > AllowWithLog > Allow
+```
+
+**Example**:
+```python
+# Policy 1: Allow
+policy.before_read("data/*", lambda ctx: PolicyAction.Allow)
+
+# Policy 2: Log
+policy.before_read("data/sensitive/*", lambda ctx: PolicyAction.Log)
+
+# Policy 3: Deny
+policy.before_read("data/sensitive/admin/*", lambda ctx: PolicyAction.Deny)
+
+# Read "data/sensitive/admin/keys"
+# Result: Deny (highest precedence)
+```
+
+## Pattern Matching
+
+Policies use **glob-style patterns**:
+
+| Pattern | Matches | Example |
+|---------|---------|----------|
+| `users/*` | Single level | `users/alice`, `users/bob` |
+| `users/**` | Multiple levels | `users/alice/profile/email` |
+| `*.json` | Extension | `config.json`, `data.json` |
+| `user_[0-9]*` | Regex | `user_123`, `user_456` |
+
+```python
+# Match specific paths
+policy.before_write("config/production", deny_all())
+
+# Match all under prefix
+policy.before_write("system/*", deny_all())
+
+# Match deeply nested
+policy.after_read("users/**/email", redact_value(b"[REDACTED]"))
+
+# Match by extension
+policy.before_delete("backups/*.sql", deny_all())
+```
+
+## Rate Limiting
+
+Token bucket rate limiter with configurable scope:
+
+```python
+# Global rate limit (all operations)
+policy.add_rate_limit(
+    operation="all",  # or "read", "write", "delete"
+    max_per_minute=1000,
+    scope="global"
+)
+
+# Per-agent rate limit
+policy.add_rate_limit(
+    operation="write",
+    max_per_minute=100,
+    scope="agent_id"
+)
+
+# Per-session rate limit
+policy.add_rate_limit(
+    operation="read",
+    max_per_minute=500,
+    scope="session_id"
+)
+
+# Custom scope (any context field)
+policy.add_rate_limit(
+    operation="write",
+    max_per_minute=50,
+    scope="user_tier"  # Uses ctx.custom["user_tier"]
+)
+```
+
+### Rate Limit Example
+
+```python
+from sochdb import PolicyEngine, PolicyContext
+
+policy = PolicyEngine(db)
+policy.add_rate_limit("write", max_per_minute=10, scope="agent_id")
+
+ctx = PolicyContext.new("write", b"data/key").with_agent_id("agent_123")
+
+# First 10 writes: OK
+for i in range(10):
+    policy.put(b"data/key", b"value", context=ctx)
+
+# 11th write: Rate limited
+try:
+    policy.put(b"data/key", b"value", context=ctx)
+except PolicyViolationError as e:
+    print(f"Rate limit exceeded: {e}")
+```
+
+## Audit Logging
+
+Automatic operation tracking with timestamps:
+
+```python
+from sochdb import PolicyEngine
+
+policy = PolicyEngine(db)
+policy.enable_audit()
+
+# All operations are logged
+ctx = PolicyContext.new("write", b"users/alice").with_agent_id("agent_123")
+policy.put(b"users/alice", b"data", context=ctx)
+
+ctx = PolicyContext.new("read", b"users/alice").with_agent_id("agent_123")
+policy.get(b"users/alice", context=ctx)
+
+# Retrieve audit log
+log_entries = policy.get_audit_log(limit=100)
+for entry in log_entries:
+    print(f"{entry.timestamp}: {entry.operation} on {entry.key} by {entry.agent_id} → {entry.result}")
+
+# Output:
+# 2024-03-15 10:00:00: write on users/alice by agent_123 → allowed
+# 2024-03-15 10:00:01: read on users/alice by agent_123 → allowed
+```
+
+### Audit Entry Fields
+
+```python
+class AuditEntry:
+    timestamp: Instant       # When the operation occurred
+    operation: str          # "read", "write", "delete"
+    key: str                # Key that was accessed
+    agent_id: Optional[str] # Agent that performed the operation
+    session_id: Optional[str]
+    result: str             # "allowed", "denied", "rate_limited", "redacted"
+```
+
+## Use Cases
+
+<AccordionGroup>
+  <Accordion title="Agent Safety Guardrails">
+    Prevent AI agents from accessing or modifying system configuration:
+    
+    ```python
+    from sochdb import PolicyEngine, PolicyAction
+    
+    policy = PolicyEngine(db)
+    
+    # 1. Block writes to system keys
+    policy.before_write("system/*", lambda ctx: (
+        PolicyAction.Deny if ctx.agent_id else PolicyAction.Allow
+    ))
+    
+    # 2. Block reads of credentials
+    policy.before_read("credentials/*", lambda ctx: PolicyAction.Deny)
+    
+    # 3. Block deletion of backups
+    policy.before_delete("backups/*", lambda ctx: PolicyAction.Deny)
+    
+    # 4. Rate limit agent operations
+    policy.add_rate_limit("write", max_per_minute=50, scope="agent_id")
+    policy.add_rate_limit("read", max_per_minute=200, scope="agent_id")
+    
+    # 5. Audit all agent actions
+    policy.enable_audit()
+    ```
+  </Accordion>
+  
+  <Accordion title="PII Redaction (GDPR/CCPA)">
+    Automatically redact personally identifiable information:
+    
+    ```python
+    from sochdb import PolicyEngine, PolicyAction
+    
+    policy = PolicyEngine(db)
+    
+    # Redact email addresses
+    policy.after_read("users/*/email", lambda ctx: (
+        PolicyAction.Modify(b"[REDACTED@example.com]")
+    ))
+    
+    # Redact phone numbers
+    policy.after_read("users/*/phone", lambda ctx: (
+        PolicyAction.Modify(b"XXX-XXX-XXXX")
+    ))
+    
+    # Redact SSN
+    policy.after_read("users/*/ssn", lambda ctx: (
+        PolicyAction.Modify(b"***-**-****")
+    ))
+    
+    # Redact credit cards
+    policy.after_read("payments/*/card", lambda ctx: (
+        PolicyAction.Modify(b"XXXX-XXXX-XXXX-XXXX")
+    ))
+    
+    # Context-aware redaction (only redact for non-admin)
+    policy.after_read("users/*/email", lambda ctx: (
+        PolicyAction.Allow if ctx.agent_id == "admin_agent"
+        else PolicyAction.Modify(b"[REDACTED]")
+    ))
+    ```
+  </Accordion>
+  
+  <Accordion title="Multi-Tenant Access Control">
+    Enforce tenant isolation at the policy level:
+    
+    ```python
+    from sochdb import PolicyEngine, PolicyAction
+    
+    policy = PolicyEngine(db)
+    
+    # Enforce namespace boundaries
+    policy.before_read("*", lambda ctx: (
+        PolicyAction.Allow if ctx.custom.get("tenant_id") == extract_tenant_from_key(ctx.key)
+        else PolicyAction.Deny
+    ))
+    
+    policy.before_write("*", lambda ctx: (
+        PolicyAction.Allow if ctx.custom.get("tenant_id") == extract_tenant_from_key(ctx.key)
+        else PolicyAction.Deny
+    ))
+    
+    # Helper function
+    def extract_tenant_from_key(key: bytes) -> str:
+        # Extract tenant from key like "tenant_acme/data/key"
+        key_str = key.decode("utf-8")
+        return key_str.split("/")[0].replace("tenant_", "")
+    
+    # Usage
+    ctx = PolicyContext.new("read", b"tenant_acme/users/alice")
+    ctx.set("tenant_id", "acme")
+    
+    result = policy.get(b"tenant_acme/users/alice", context=ctx)  # Allowed
+    
+    ctx.set("tenant_id", "techcorp")
+    result = policy.get(b"tenant_acme/users/alice", context=ctx)  # Denied
+    ```
+  </Accordion>
+  
+  <Accordion title="Compliance Audit Trail">
+    Maintain detailed audit logs for compliance (SOC 2, HIPAA):
+    
+    ```python
+    from sochdb import PolicyEngine, PolicyAction
+    import json
+    
+    policy = PolicyEngine(db)
+    policy.enable_audit()
+    
+    # Log all access to sensitive data
+    policy.after_read("sensitive/*", lambda ctx: PolicyAction.Log)
+    policy.after_write("sensitive/*", lambda ctx: PolicyAction.Log)
+    
+    # Export audit log for compliance
+    def export_audit_log(start_date, end_date):
+        entries = policy.get_audit_log(limit=10000)
+        
+        # Filter by date range
+        filtered = [
+            e for e in entries
+            if start_date <= e.timestamp <= end_date
+        ]
+        
+        # Convert to JSON for external audit system
+        audit_data = [
+            {
+                "timestamp": e.timestamp.isoformat(),
+                "operation": e.operation,
+                "key": e.key,
+                "agent_id": e.agent_id,
+                "session_id": e.session_id,
+                "result": e.result
+            }
+            for e in filtered
+        ]
+        
+        return json.dumps(audit_data, indent=2)
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Performance
+
+| Operation | Time | Notes |
+|-----------|------|-------|
+| Policy evaluation | {"<"}0.01ms | Per policy (pattern match + handler) |
+| Rate limit check | {"<"}0.05ms | Token bucket update |
+| Audit log write | {"<"}0.1ms | In-memory append |
+| Total overhead | 0.1-0.5ms | For typical setup (3-5 policies) |
+
+<Note>
+**Benchmark** (5 policies, 2 rate limits, audit enabled, Apple M1):
+- Policy evaluation: 0.03ms
+- Rate limit check: 0.02ms
+- Audit log: 0.05ms
+- **Total overhead: 0.1ms** (negligible)
+</Note>
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use Specific Patterns" icon="crosshairs">
+    Avoid overly broad patterns:
+    ```python
+    # Good: Specific
+    policy.before_write("system/config", deny_all())
+    policy.before_write("credentials/*", deny_all())
+    
+    # Bad: Too broad (performance hit)
+    policy.before_write("*", lambda ctx: (
+        PolicyAction.Deny if "system" in ctx.key.decode()
+        else PolicyAction.Allow
+    ))
+    ```
+  </Card>
+  
+  <Card title="Set Realistic Rate Limits" icon="gauge-high">
+    Match your workload:
+    ```python
+    # Interactive agent (chatbot)
+    policy.add_rate_limit("write", 100, "agent_id")
+    
+    # Batch processing agent
+    policy.add_rate_limit("write", 10000, "agent_id")
+    
+    # Read-heavy agent
+    policy.add_rate_limit("read", 1000, "agent_id")
+    ```
+  </Card>
+  
+  <Card title="Use Context Fields" icon="tag">
+    Pass relevant context for policy decisions:
+    ```python
+    ctx = (
+        PolicyContext.new("write", b"data/key")
+        .with_agent_id("agent_123")
+        .with_session_id("session_456")
+    )
+    ctx.set("user_tier", "premium")
+    ctx.set("environment", "production")
+    
+    policy.put(b"data/key", value, context=ctx)
+    ```
+  </Card>
+  
+  <Card title="Monitor Audit Logs" icon="chart-line">
+    Regularly review denied operations:
+    ```python
+    # Check for policy violations
+    entries = policy.get_audit_log(limit=1000)
+    denied = [e for e in entries if e.result == "denied"]
+    
+    if len(denied) > 100:
+        alert_admin(f"High denial rate: {len(denied)} in last hour")
+    ```
+  </Card>
+</CardGroup>
+
+## Integration with Namespace Isolation
+
+Combine policies with namespace isolation:
+
+```python
+from sochdb import Database, PolicyEngine
+
+db = Database.open("./multi_tenant_db")
+policy = PolicyEngine(db)
+
+# Enforce namespace boundaries
+policy.before_read("*", lambda ctx: (
+    PolicyAction.Allow if ctx.custom.get("namespace") == extract_namespace(ctx.key)
+    else PolicyAction.Deny
+))
+
+# Usage
+with db.use_namespace("tenant_acme") as ns:
+    ctx = PolicyContext.new("read", b"tenant_acme/data")
+    ctx.set("namespace", "tenant_acme")
+    
+    # Allowed (namespace matches)
+    value = policy.get(b"tenant_acme/data", context=ctx)
+    
+    # Denied (namespace mismatch)
+    ctx.set("namespace", "tenant_techcorp")
+    try:
+        value = policy.get(b"tenant_acme/data", context=ctx)
+    except PolicyViolationError:
+        print("Cross-namespace access denied")
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Namespace Isolation" icon="shield" href="/features/namespace-isolation">
+    Combine policies with multi-tenant namespaces
+  </Card>
+  <Card title="Graph Overlay" icon="diagram-project" href="/features/graph-overlay">
+    Apply policies to graph operations
+  </Card>
+</CardGroup>

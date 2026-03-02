@@ -1,0 +1,450 @@
+---
+title: 'Batch Operations'
+description: 'High-throughput batch writes with group commit'
+---
+
+## BatchWriter
+
+High-throughput batch operations with adaptive sizing and transaction chunking.
+
+### Modes
+
+| Mode | auto_commit | Behavior |
+|------|-------------|----------|
+| **Buffered** | false | All ops buffered, single commit at execute() |
+| **Streaming** | true | Auto-commits every `max_batch_size` ops |
+
+### Creating a Batch Writer
+
+```rust
+use sochdb::prelude::*;
+
+let conn = Connection::open("./data")?;
+
+// Buffered mode (default)
+let batch = conn.batch();
+
+// Streaming mode
+let batch = conn.batch()
+    .max_batch_size(1000)
+    .auto_commit(true);
+```
+
+## Batch Operations
+
+### insert()
+
+Add an insert operation:
+
+```rust
+pub fn insert(self, table: &str, values: Vec<(&str, SochValue)>) -> Self
+```
+
+**Example:**
+
+```rust
+let result = conn.batch()
+    .insert("users", vec![
+        ("id", SochValue::Int(1)),
+        ("name", SochValue::Text("Alice".into())),
+        ("age", SochValue::Int(30)),
+    ])
+    .insert("users", vec![
+        ("id", SochValue::Int(2)),
+        ("name", SochValue::Text("Bob".into())),
+        ("age", SochValue::Int(25)),
+    ])
+    .execute()?;
+
+println!("Inserted {} rows", result.ops_executed);
+```
+
+### insert_slice()
+
+Zero-allocation insert path (fastest). Values must be in schema column order:
+
+```rust
+pub fn insert_slice(
+    self,
+    table: &str,
+    row_id: u64,
+    values: Vec<Option<SochValue>>
+) -> Self
+```
+
+**Example:**
+
+```rust
+// Schema: [id, name, age]
+let result = conn.batch()
+    .insert_slice("users", 1, vec![
+        Some(SochValue::UInt(1)),
+        Some(SochValue::Text("Alice".into())),
+        Some(SochValue::Int(30)),
+    ])
+    .insert_slice("users", 2, vec![
+        Some(SochValue::UInt(2)),
+        Some(SochValue::Text("Bob".into())),
+        None,  // NULL age
+    ])
+    .execute()?;
+```
+
+### update()
+
+Add an update operation:
+
+```rust
+pub fn update(
+    self,
+    table: &str,
+    key_field: &str,
+    key_value: SochValue,
+    updates: Vec<(&str, SochValue)>
+) -> Self
+```
+
+**Example:**
+
+```rust
+let result = conn.batch()
+    .update(
+        "users",
+        "id",
+        SochValue::Int(1),
+        vec![
+            ("age", SochValue::Int(31)),
+            ("status", SochValue::Text("active".into())),
+        ]
+    )
+    .execute()?;
+```
+
+### delete()
+
+Add a delete operation:
+
+```rust
+pub fn delete(self, table: &str, key_field: &str, key_value: SochValue) -> Self
+```
+
+**Example:**
+
+```rust
+let result = conn.batch()
+    .delete("users", "id", SochValue::Int(1))
+    .delete("users", "id", SochValue::Int(2))
+    .execute()?;
+
+println!("Deleted {} rows", result.ops_executed);
+```
+
+## Configuration
+
+### max_batch_size()
+
+Set maximum operations per transaction chunk:
+
+```rust
+pub fn max_batch_size(self, size: usize) -> Self
+```
+
+**Recommended values:**
+
+- **100-500**: Low latency, more fsyncs
+- **1000-5000**: Balanced (default)
+- **10000+**: Maximum throughput, higher latency spikes
+
+**Example:**
+
+```rust
+let batch = conn.batch()
+    .max_batch_size(5000)  // 5000 ops per chunk
+    .auto_commit(true);
+```
+
+### auto_commit()
+
+Enable streaming mode with automatic transaction chunking:
+
+```rust
+pub fn auto_commit(self, enabled: bool) -> Self
+```
+
+**Example:**
+
+```rust
+// Streaming mode: auto-commits every 1000 ops
+let result = conn.batch()
+    .max_batch_size(1000)
+    .auto_commit(true)
+    .insert("events", vec![("data", SochValue::Text("event1".into()))])
+    // ... millions of events
+    .execute()?;  // Commits final partial batch
+
+println!("Chunks committed: {}", result.chunks_committed);
+```
+
+## Execution
+
+### execute()
+
+Execute all pending operations:
+
+```rust
+pub fn execute(self) -> Result<BatchResult>
+```
+
+In streaming mode, commits any remaining operations in the final partial batch.
+
+## BatchResult
+
+Result type for batch operations:
+
+```rust
+pub struct BatchResult {
+    pub ops_executed: usize,    // Successfully executed operations
+    pub ops_failed: usize,      // Failed operations
+    pub duration_ms: u64,       // Total execution time
+    pub fsync_count: u64,       // Number of fsyncs performed
+    pub chunks_committed: usize, // Transaction chunks (streaming mode)
+}
+```
+
+**Example:**
+
+```rust
+let result = conn.batch()
+    .max_batch_size(1000)
+    .auto_commit(true)
+    .insert("users", vec![("name", SochValue::Text("Alice".into()))])
+    // ... 5432 more inserts
+    .execute()?;
+
+println!("Executed: {}", result.ops_executed);
+println!("Failed: {}", result.ops_failed);
+println!("Duration: {}ms", result.duration_ms);
+println!("Fsyncs: {}", result.fsync_count);
+println!("Chunks: {}", result.chunks_committed);  // Should be 6 (5×1000 + 433)
+```
+
+## Bulk Operations
+
+### bulk_insert()
+
+Convenience method for bulk inserts (uses streaming mode internally):
+
+```rust
+pub fn bulk_insert(
+    &self,
+    table: &str,
+    rows: Vec<Vec<(&str, SochValue)>>
+) -> Result<BatchResult>
+```
+
+**Example:**
+
+```rust
+let rows = vec![
+    vec![("id", SochValue::Int(1)), ("name", SochValue::Text("Alice".into()))],
+    vec![("id", SochValue::Int(2)), ("name", SochValue::Text("Bob".into()))],
+    // ... thousands more rows
+];
+
+let result = conn.bulk_insert("users", rows)?;
+println!("Inserted {} rows in {}ms", result.ops_executed, result.duration_ms);
+```
+
+### bulk_insert_slice()
+
+Fastest bulk insert using zero-allocation path:
+
+```rust
+pub fn bulk_insert_slice(
+    &self,
+    table: &str,
+    rows: Vec<(u64, Vec<Option<SochValue>>)>
+) -> Result<BatchResult>
+```
+
+**Example:**
+
+```rust
+let rows = vec![
+    (1, vec![Some(SochValue::UInt(1)), Some(SochValue::Text("Alice".into()))]),
+    (2, vec![Some(SochValue::UInt(2)), Some(SochValue::Text("Bob".into()))]),
+    (3, vec![Some(SochValue::UInt(3)), None]),  // NULL name
+];
+
+let result = conn.bulk_insert_slice("users", rows)?;
+```
+
+## GroupCommitConfig
+
+Configuration for group commit optimization:
+
+```rust
+pub struct GroupCommitConfig {
+    pub max_wait_ms: u64,         // Maximum wait time before flush
+    pub max_batch_size: usize,    // Maximum ops before flush
+    pub target_batch_size: usize, // Target batch size (adaptive)
+    pub fsync_latency_us: u64,    // Average fsync latency
+}
+```
+
+**Default values:**
+
+```rust
+GroupCommitConfig {
+    max_wait_ms: 10,
+    max_batch_size: 1000,
+    target_batch_size: 100,
+    fsync_latency_us: 5000,  // 5ms
+}
+```
+
+## GroupCommitBuffer
+
+<Warning>
+**DEPRECATED**: Use `sochdb_storage::EventDrivenGroupCommit` for actual WAL integration.
+This client-side implementation is in-memory only.
+</Warning>
+
+### optimal_batch_size()
+
+Calculate optimal batch size based on workload:
+
+```rust
+pub fn optimal_batch_size(
+    &self,
+    arrival_rate: f64,  // ops/sec
+    wait_cost: f64      // cost per unit wait time
+) -> usize
+```
+
+**Formula:**
+
+```text
+N* = sqrt(2 × L_fsync × λ / C_wait)
+```
+
+Where:
+- `L_fsync` = fsync latency
+- `λ` = arrival rate (ops/sec)
+- `C_wait` = cost per unit wait time
+
+**Example:**
+
+```rust
+let config = GroupCommitConfig::default();
+let buffer = GroupCommitBuffer::new(config);
+
+let optimal = buffer.optimal_batch_size(
+    10_000.0,  // 10K ops/sec
+    0.001      // 1ms wait cost
+);
+
+println!("Optimal batch size: {}", optimal);
+```
+
+## Performance Model
+
+Per-operation cost:
+
+```text
+C_op = c + L_fsync / K
+```
+
+Where:
+- `c` = CPU cost per write (~500ns)
+- `L_fsync` = fsync latency (~5ms)
+- `K` = batch size (ops per txn)
+
+### Example Calculation
+
+For 1000 ops/batch with 5ms fsync:
+
+```text
+C_op = 500ns + 5ms/1000 = 500ns + 5μs = 5.5μs per op
+Throughput = 1/5.5μs ≈ 182K ops/sec
+```
+
+## BatchOp Types
+
+Low-level operation types:
+
+```rust
+pub enum BatchOp {
+    Insert {
+        table: String,
+        values: Vec<(String, SochValue)>,
+    },
+    InsertSlice {
+        table: String,
+        row_id: u64,
+        values: Vec<Option<SochValue>>,
+    },
+    Update {
+        table: String,
+        key_field: String,
+        key_value: SochValue,
+        updates: Vec<(String, SochValue)>,
+    },
+    Delete {
+        table: String,
+        key_field: String,
+        key_value: SochValue,
+    },
+}
+```
+
+## Memory Usage
+
+### Buffered Mode
+
+```text
+Memory = O(total_operations)
+```
+
+All operations buffered until execute().
+
+### Streaming Mode
+
+```text
+Memory = O(max_batch_size)
+```
+
+Bounded memory usage, predictable latency.
+
+## Best Practices
+
+1. **Use streaming mode** for large datasets:
+   ```rust
+   conn.batch()
+       .max_batch_size(5000)
+       .auto_commit(true)
+   ```
+
+2. **Use insert_slice()** for maximum throughput:
+   ```rust
+   batch.insert_slice("table", row_id, values)
+   ```
+
+3. **Tune batch size** based on workload:
+   - Low latency: 100-500
+   - Balanced: 1000-5000
+   - Max throughput: 10000+
+
+4. **Monitor results**:
+   ```rust
+   let result = batch.execute()?;
+   if result.ops_failed > 0 {
+       eprintln!("Failed: {}", result.ops_failed);
+   }
+   ```
+
+## See Also
+
+- [Connection](/api/rust/connection) - Database connections
+- [Queries](/api/rust/queries) - Query operations
+- [Vectors](/api/rust/vectors) - Vector operations

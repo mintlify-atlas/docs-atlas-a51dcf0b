@@ -1,0 +1,406 @@
+---
+title: 'Node.js SDK'
+description: 'Official Node.js/TypeScript SDK for SochDB with async/await support'
+icon: 'node-js'
+---
+
+## Overview
+
+The SochDB Node.js SDK provides modern async/await API with:
+
+- **Embedded mode (FFI)** for lowest latency
+- **IPC mode (Unix sockets)** for multi-process deployments
+- **TypeScript support** with full type definitions
+- **Namespace isolation** for multi-tenant apps
+- **Vector search** with HNSW indexing
+- **Transactions** with ACID guarantees
+
+## Installation
+
+<CodeGroup>
+
+```bash npm
+npm install @sochdb/sochdb
+```
+
+```bash yarn
+yarn add @sochdb/sochdb
+```
+
+```bash pnpm
+pnpm add @sochdb/sochdb
+```
+
+</CodeGroup>
+
+## Basic Usage
+
+### Opening a Database
+
+```typescript
+import { Database } from '@sochdb/sochdb';
+
+// Open or create a database
+const db = await Database.open('./my_db');
+
+// Basic operations
+await db.put('greeting', 'Hello, SochDB!');
+const value = await db.get('greeting');
+console.log(value?.toString());  // "Hello, SochDB!"
+
+await db.close();
+```
+
+### Path-Based Access
+
+```typescript
+import { Database } from '@sochdb/sochdb';
+
+const db = await Database.open('./my_db');
+
+// Hierarchical key structure
+await db.putPath(['users', 'alice', 'name'], 'Alice Smith');
+await db.putPath(['users', 'alice', 'email'], 'alice@example.com');
+await db.putPath(['users', 'bob', 'name'], 'Bob Jones');
+
+// Read by path
+const name = await db.getPath(['users', 'alice', 'name']);
+console.log(name?.toString());  // "Alice Smith"
+
+// Delete a key
+await db.delete('greeting');
+const deleted = await db.get('greeting');
+if (deleted === null) {
+  console.log('✓ Key confirmed deleted');
+}
+
+await db.close();
+```
+
+### Prefix Queries
+
+```typescript
+import { Database } from '@sochdb/sochdb';
+
+const db = await Database.open('./my_db');
+
+// Query prefix scan
+const results = await db.query('users/')
+  .limit(10)
+  .execute();
+
+console.log('✓ Prefix scan results:');
+for (const [key, value] of results) {
+  console.log(`  ${key} = ${value.toString()}`);
+}
+
+await db.close();
+```
+
+## Transactions
+
+### Basic Transactions
+
+```typescript
+import { Database } from '@sochdb/sochdb';
+
+const db = await Database.open('./my_db');
+
+// Automatic transaction with callback (recommended)
+await db.withTransaction(async (txn) => {
+  await txn.put('accounts/alice/balance', '1000');
+  await txn.put('accounts/bob/balance', '500');
+  console.log('✓ Transaction: wrote initial balances');
+});
+console.log('✓ Transaction committed automatically');
+
+await db.close();
+```
+
+### Account Transfer Example
+
+```typescript
+import { Database } from '@sochdb/sochdb';
+
+const db = await Database.open('./bank_db');
+
+// Initialize accounts
+await db.withTransaction(async (txn) => {
+  await txn.put('accounts/alice/balance', '1000');
+  await txn.put('accounts/bob/balance', '500');
+});
+
+// Atomic transfer
+await db.withTransaction(async (txn) => {
+  // Read current balances
+  const aliceData = await txn.get('accounts/alice/balance');
+  const bobData = await txn.get('accounts/bob/balance');
+
+  const aliceBalance = parseInt(aliceData?.toString() || '0');
+  const bobBalance = parseInt(bobData?.toString() || '0');
+
+  const transferAmount = 250;
+
+  // Update balances atomically
+  await txn.put('accounts/alice/balance', (aliceBalance - transferAmount).toString());
+  await txn.put('accounts/bob/balance', (bobBalance + transferAmount).toString());
+
+  console.log(`✓ Transfer: Alice -> Bob: $${transferAmount}`);
+});
+
+// Verify final balances
+const alice = await db.get('accounts/alice/balance');
+const bob = await db.get('accounts/bob/balance');
+
+console.log('\n✓ Final balances:');
+console.log(`  Alice: $${alice?.toString()}`);
+console.log(`  Bob: $${bob?.toString()}`);
+
+await db.close();
+```
+
+### Transaction Rollback
+
+```typescript
+import { Database } from '@sochdb/sochdb';
+
+const db = await Database.open('./my_db');
+
+// Transaction rollback on error
+try {
+  await db.withTransaction(async (txn) => {
+    await txn.put('accounts/alice/balance', '9999');
+    throw new Error('Simulated failure');
+  });
+} catch (e) {
+  console.log(`✓ Transaction rolled back: ${(e as Error).message}`);
+}
+
+// Verify balance unchanged after rollback
+const aliceAfter = await db.get('accounts/alice/balance');
+console.log(`✓ Alice's balance after rollback: $${aliceAfter?.toString()}`);
+
+await db.close();
+```
+
+## Vector Search
+
+### Creating a Vector Index
+
+```typescript
+import { VectorIndex, VectorIndexConfig, DistanceMetric } from '@sochdb/sochdb';
+
+// Configuration for the vector index
+const config: VectorIndexConfig = {
+  dimension: 128,                      // Embedding dimension
+  metric: DistanceMetric.Cosine,       // Cosine similarity
+  m: 16,                               // HNSW connections per node
+  efConstruction: 100,                 // Construction quality factor
+};
+
+const index = new VectorIndex('./vector_index', config);
+console.log('✓ Vector index created');
+```
+
+### Bulk Building Vectors
+
+```typescript
+import { VectorIndex, VectorIndexConfig, DistanceMetric } from '@sochdb/sochdb';
+
+const config: VectorIndexConfig = {
+  dimension: 128,
+  metric: DistanceMetric.Cosine,
+  m: 16,
+  efConstruction: 100,
+};
+
+const index = new VectorIndex('./vector_index', config);
+
+// Generate sample embeddings (in practice, use a real embedding model)
+const vectors: number[][] = [];
+const labels: string[] = [];
+
+for (let i = 0; i < 100; i++) {
+  // Create a simple pattern-based embedding for demo
+  const vec: number[] = new Array(128);
+  for (let j = 0; j < 128; j++) {
+    vec[j] = ((i * j) % 256) / 255.0;
+  }
+  vectors.push(vec);
+  labels.push(`document_${i}`);
+}
+
+// Bulk build the index
+await index.bulkBuild(vectors, labels);
+console.log(`✓ Indexed ${vectors.length} vectors`);
+```
+
+### Searching Vectors
+
+```typescript
+import { VectorIndex } from '@sochdb/sochdb';
+
+// ... create and populate index ...
+
+// Create a query vector
+const query: number[] = new Array(128);
+for (let j = 0; j < 128; j++) {
+  query[j] = ((42 * j) % 256) / 255.0;
+}
+
+// Search for nearest neighbors
+const results = await index.query(query, 5);  // k=5
+
+console.log('\n✓ Top 5 nearest neighbors:');
+results.forEach((result, i) => {
+  console.log(`  ${i + 1}. ${result.label ?? '<no label>'} (distance: ${result.distance.toFixed(4)})`);
+});
+```
+
+### Distance Utilities
+
+```typescript
+import { VectorIndex } from '@sochdb/sochdb';
+
+// Distance utility functions
+const a = [1.0, 0.0, 0.0];
+const b = [0.707, 0.707, 0.0];
+
+const cosineDist = VectorIndex.computeCosineDistance(a, b);
+const euclideanDist = VectorIndex.computeEuclideanDistance(a, b);
+
+console.log('✓ Distance calculations:');
+console.log(`  Cosine distance: ${cosineDist.toFixed(4)}`);
+console.log(`  Euclidean distance: ${euclideanDist.toFixed(4)}`);
+
+// Normalize a vector
+const v = [3.0, 4.0];
+const normalized = VectorIndex.normalizeVector(v);
+console.log(`  Normalized [3, 4]: [${normalized.map(x => x.toFixed(2)).join(', ')}]`);
+```
+
+## Graph Overlay
+
+Build lightweight graph structures for agent memory:
+
+```typescript
+import { Database, GraphOverlay } from '@sochdb/sochdb';
+
+const db = await Database.open('./my_db');
+const graph = new GraphOverlay(db, 'agent_memory');
+
+// Track entity relationships
+await graph.addNode('entity_alice', { type: 'person', name: 'Alice' });
+await graph.addNode('entity_acme', { type: 'company', name: 'Acme Corp' });
+await graph.addNode('entity_project', { type: 'project', name: 'AI Initiative' });
+
+await graph.addEdge('entity_alice', 'entity_acme', { relationship: 'works_at' });
+await graph.addEdge('entity_alice', 'entity_project', { relationship: 'leads' });
+
+// Find all entities Alice is connected to
+const connections = await graph.getNeighbors('entity_alice');
+console.log(`Alice is connected to: ${connections.length} entities`);
+
+await db.close();
+```
+
+## Namespace Isolation
+
+```typescript
+import { Database } from '@sochdb/sochdb';
+
+const db = await Database.open('./my_db');
+
+// Create namespace for tenant isolation
+const namespace = db.namespace('tenant_acme');
+
+// All operations are scoped to this namespace
+await namespace.put('config/api_key', 'secret123');
+const apiKey = await namespace.get('config/api_key');
+
+console.log(`API Key: ${apiKey?.toString()}`);
+
+await db.close();
+```
+
+## SDK Features
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Basic KV | ✅ | put, get, delete, query |
+| Transactions | ✅ | ACID with MVCC |
+| Vector Search | ✅ | HNSW indexing |
+| Namespace Isolation | ✅ | Multi-tenant support |
+| Graph Overlay | ✅ | Agent memory tracking |
+| TypeScript Types | ✅ | Full type definitions |
+| Async/Await | ✅ | Modern Promise-based API |
+
+## External Resources
+
+<CardGroup cols={2}>
+
+<Card title="Node.js SDK Repository" icon="github" href="https://github.com/sochdb/sochdb-nodejs-sdk">
+  Source code and development
+</Card>
+
+<Card title="Node.js Examples" icon="code" href="https://github.com/sochdb/sochdb-nodejs-examples">
+  Complete working examples
+</Card>
+
+</CardGroup>
+
+## TypeScript Configuration
+
+For the best TypeScript experience, ensure your `tsconfig.json` includes:
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "esModuleInterop": true,
+    "strict": true
+  }
+}
+```
+
+## Performance Tips
+
+<AccordionGroup>
+
+<Accordion title="Use bulk operations for large datasets">
+  Use `bulkBuild()` instead of individual `add()` calls when inserting many vectors. This reduces FFI overhead and improves performance.
+</Accordion>
+
+<Accordion title="Leverage async/await properly">
+  Avoid awaiting operations in tight loops. Instead, batch operations and use `Promise.all()` where possible:
+  ```typescript
+  const promises = items.map(item => db.put(item.key, item.value));
+  await Promise.all(promises);
+  ```
+</Accordion>
+
+<Accordion title="Use namespaces for multi-tenant apps">
+  Namespaces provide isolation without requiring separate database instances, reducing resource usage.
+</Accordion>
+
+<Accordion title="Close connections properly">
+  Always call `await db.close()` when done, or use try/finally blocks to ensure cleanup even on errors.
+</Accordion>
+
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+
+<Card title="Vector Search Guide" icon="magnifying-glass" href="/features/vector-search">
+  Deep dive into HNSW configuration
+</Card>
+
+<Card title="Transaction Guide" icon="lock" href="/features/transactions">
+  Learn about isolation levels
+</Card>
+
+</CardGroup>

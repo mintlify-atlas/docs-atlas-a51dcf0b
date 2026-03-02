@@ -1,0 +1,468 @@
+---
+title: 'CrewAI Integration'
+description: 'Build multi-agent systems with CrewAI and SochDB for knowledge retrieval and shared memory'
+---
+
+## Overview
+
+Integrate SochDB with CrewAI to build multi-agent systems where:
+- Agents share a common knowledge base
+- Each agent can retrieve relevant context
+- Workflow state is persisted
+- Inter-agent communication is tracked
+
+## Use Case
+
+A research crew with three agents:
+- **Researcher**: Searches knowledge base for information
+- **Writer**: Creates content based on research
+- **Reviewer**: Validates and polishes the output
+
+All agents use SochDB for knowledge retrieval and state management.
+
+## Architecture
+
+```
+┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+│  Researcher  │──▶│    Writer    │──▶│   Reviewer   │
+└──────┬───────┘   └──────┬───────┘   └──────┬───────┘
+       │                  │                  │
+       └──────────────────┼──────────────────┘
+                          │
+                          ▼
+              ┌───────────────────────┐
+              │   SochDB Knowledge    │
+              │   - Vector Search     │
+              │   - Shared Memory     │
+              └───────────────────────┘
+```
+
+## Complete Implementation
+
+<Steps>
+
+### Install Dependencies
+
+```bash
+pip install crewai crewai-tools sochdb numpy requests
+```
+
+### Create SochDB Retrieval Tool
+
+```python crewai_sochdb.py
+import os
+import sys
+import time
+import numpy as np
+import requests
+from typing import List, Dict
+
+from crewai import Agent, Task, Crew
+from crewai.tools import BaseTool
+from sochdb import VectorIndex
+from dotenv import load_dotenv
+
+load_dotenv()
+
+class SochDBRetriever:
+    """SochDB-powered retrieval for CrewAI agents."""
+    
+    def __init__(self):
+        # Azure embeddings
+        self.embed_endpoint = os.getenv("AZURE_EMEBEDDING_ENDPOINT")
+        self.embed_key = os.getenv("AZURE_EMEBEDDING_API_KEY")
+        self.embed_deployment = os.getenv("AZURE_EMEBEDDING_DEPLOYMENT_NAME", "embedding")
+        self.embed_version = os.getenv("AZURE_EMEBEDDING_API_VERSION", "2024-12-01-preview")
+        
+        # Initialize index
+        self.dim = 1536
+        self.index = VectorIndex(dimension=self.dim, max_connections=16, ef_construction=100)
+        self.documents = []
+    
+    def embed(self, texts: List[str]) -> np.ndarray:
+        """Generate embeddings via Azure."""
+        url = f"{self.embed_endpoint.rstrip('/')}/openai/deployments/{self.embed_deployment}/embeddings?api-version={self.embed_version}"
+        headers = {"api-key": self.embed_key, "Content-Type": "application/json"}
+        response = requests.post(url, headers=headers, json={"input": texts})
+        response.raise_for_status()
+        return np.array([item["embedding"] for item in response.json()["data"]], dtype=np.float32)
+    
+    def add_documents(self, docs: List[str]):
+        """Add documents to the knowledge base."""
+        embeddings = self.embed(docs)
+        start_id = len(self.documents)
+        ids = np.arange(start_id, start_id + len(docs), dtype=np.uint64)
+        self.index.insert_batch(ids, embeddings)
+        self.documents.extend(docs)
+        return len(docs)
+    
+    def search(self, query: str, k: int = 3) -> List[str]:
+        """Search for relevant documents."""
+        query_embed = self.embed([query])[0]
+        results = self.index.search(query_embed, k=k)
+        return [self.documents[int(r[0])] for r in results if int(r[0]) < len(self.documents)]
+
+class SochDBSearchTool(BaseTool):
+    """CrewAI tool for searching SochDB."""
+    name: str = "search_knowledge"
+    description: str = "Search the SochDB knowledge base for relevant information. Use this to find facts and context."
+    
+    def __init__(self, retriever: SochDBRetriever):
+        super().__init__()
+        self.retriever = retriever
+    
+    def _run(self, query: str) -> str:
+        """Execute the search."""
+        results = self.retriever.search(query, k=3)
+        return "\n\n".join(f"- {r}" for r in results)
+
+def create_research_crew(retriever: SochDBRetriever):
+    """
+    Create a research crew with SochDB integration.
+    """
+    
+    # Create SochDB tool
+    search_tool = SochDBSearchTool(retriever)
+    
+    # Azure LLM configuration
+    llm_config = {
+        "model": "azure/gpt-4",
+        "api_key": os.getenv("AZURE_OPENAI_API_KEY"),
+        "api_base": os.getenv("AZURE_OPENAI_API_BASE"),
+        "api_version": os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
+    }
+    
+    # Create agents
+    researcher = Agent(
+        role="Research Analyst",
+        goal="Find accurate information about the topic using SochDB",
+        backstory="""You are an expert research analyst skilled at finding
+        and synthesizing information from knowledge bases.""",
+        tools=[search_tool],
+        verbose=True,
+        llm=llm_config
+    )
+    
+    writer = Agent(
+        role="Technical Writer",
+        goal="Create clear, accurate documentation based on research",
+        backstory="""You are a skilled technical writer who excels at
+        translating complex technical concepts into clear documentation.""",
+        verbose=True,
+        llm=llm_config
+    )
+    
+    reviewer = Agent(
+        role="Technical Reviewer",
+        goal="Ensure accuracy and quality of the documentation",
+        backstory="""You are a meticulous technical reviewer with deep
+        expertise in databases and AI systems.""",
+        verbose=True,
+        llm=llm_config
+    )
+    
+    # Create tasks
+    research_task = Task(
+        description="""Research SochDB's key performance characteristics and features.
+        Use the search_knowledge tool to find relevant information.""",
+        agent=researcher,
+        expected_output="A comprehensive summary of SochDB's performance and features"
+    )
+    
+    write_task = Task(
+        description="""Write a product description for SochDB based on the research.
+        Make it clear, concise, and highlight the key benefits.""",
+        agent=writer,
+        expected_output="A polished product description"
+    )
+    
+    review_task = Task(
+        description="""Review the product description for accuracy and clarity.
+        Provide a final, polished version.""",
+        agent=reviewer,
+        expected_output="Final reviewed product description"
+    )
+    
+    # Create crew
+    crew = Crew(
+        agents=[researcher, writer, reviewer],
+        tasks=[research_task, write_task, review_task],
+        verbose=True
+    )
+    
+    return crew
+
+def main():
+    print("="*70)
+    print("  CrewAI + SochDB Integration Example")
+    print("="*70)
+    
+    # Setup retriever
+    print("\n[1] Setting up SochDB knowledge base...")
+    retriever = SochDBRetriever()
+    
+    # Add knowledge documents
+    knowledge = [
+        "SochDB is a high-performance database designed for AI agents and LLM applications.",
+        "SochDB achieves 117,000 vector inserts per second and 0.03ms search latency.",
+        "SochDB uses a Trie-Columnar Hybrid (TCH) storage engine for hierarchical data.",
+        "SochDB is 24x faster than ChromaDB on vector search benchmarks.",
+        "SochDB supports session management, context queries, and token budget enforcement.",
+        "SochDB provides an MCP (Model Context Protocol) integration for LLM tools.",
+        "SochDB's HNSW index uses SIMD acceleration for fast similarity search.",
+        "SochDB can handle 10M+ vectors with consistent sub-millisecond latency.",
+    ]
+    
+    count = retriever.add_documents(knowledge)
+    print(f"   ✓ Added {count} documents to knowledge base")
+    
+    # Create crew
+    print("\n[2] Creating research crew...")
+    crew = create_research_crew(retriever)
+    print("   ✓ Crew created with 3 agents")
+    
+    # Execute workflow
+    print("\n[3] Running research workflow...\n")
+    print("-"*70)
+    
+    start = time.perf_counter()
+    result = crew.kickoff()
+    elapsed = time.perf_counter() - start
+    
+    print("-"*70)
+    print(f"\n[4] Workflow complete in {elapsed:.1f}s")
+    print("\nFinal Output:")
+    print(result)
+    
+    print("\n" + "="*70)
+    print("  ✓ CrewAI integration example complete!")
+    print("="*70)
+
+if __name__ == "__main__":
+    main()
+```
+
+### Run the Example
+
+```bash
+python crewai_sochdb.py
+```
+
+</Steps>
+
+## Example Workflow Output
+
+```
+======================================================================
+  CrewAI + SochDB Integration Example
+======================================================================
+
+[1] Setting up SochDB knowledge base...
+   ✓ Added 8 documents to knowledge base
+
+[2] Creating research crew...
+   ✓ Crew created with 3 agents
+
+[3] Running research workflow...
+
+----------------------------------------------------------------------
+[Researcher Agent]
+Searching knowledge base for SochDB performance...
+Found 3 relevant documents:
+- SochDB achieves 117,000 vector inserts per second and 0.03ms search latency.
+- SochDB is 24x faster than ChromaDB on vector search benchmarks.
+- SochDB can handle 10M+ vectors with consistent sub-millisecond latency.
+
+[Writer Agent]
+Creating product description based on research...
+
+[Reviewer Agent]
+Reviewing and polishing the description...
+
+----------------------------------------------------------------------
+
+[4] Workflow complete in 12.3s
+
+Final Output:
+SochDB is a high-performance database engineered for AI agents and LLM
+applications. With blazing-fast performance of 117,000 vector inserts per
+second and sub-millisecond search latency, SochDB outperforms competitors
+by up to 24x. It scales effortlessly to 10M+ vectors while maintaining
+consistent performance.
+
+======================================================================
+  ✓ CrewAI integration example complete!
+======================================================================
+```
+
+## Key Integration Patterns
+
+### Custom Tool Creation
+
+```python
+from crewai.tools import BaseTool
+
+class SochDBSearchTool(BaseTool):
+    name: str = "search_knowledge"
+    description: str = "Search the SochDB knowledge base"
+    
+    def __init__(self, retriever):
+        super().__init__()
+        self.retriever = retriever
+    
+    def _run(self, query: str) -> str:
+        results = self.retriever.search(query, k=3)
+        return "\n\n".join(results)
+```
+
+### Shared Knowledge Base
+
+```python
+# All agents share the same SochDB retriever
+retriever = SochDBRetriever()
+
+researcher = Agent(
+    role="Researcher",
+    tools=[SochDBSearchTool(retriever)]
+)
+
+writer = Agent(
+    role="Writer",
+    tools=[SochDBSearchTool(retriever)]  # Same knowledge base
+)
+```
+
+### State Persistence
+
+```python
+from sochdb import Database
+
+class CrewStateManager:
+    def __init__(self, db_path: str):
+        self.db = Database.open(db_path)
+    
+    def save_task_result(self, task_id: str, result: str):
+        path = f"crew/tasks/{task_id}".encode()
+        with self.db.transaction() as txn:
+            txn.put(path, result.encode())
+    
+    def get_task_result(self, task_id: str) -> str:
+        path = f"crew/tasks/{task_id}".encode()
+        with self.db.transaction() as txn:
+            value = txn.get(path)
+            return value.decode() if value else None
+```
+
+### Inter-Agent Communication
+
+```python
+class AgentCommunication:
+    def __init__(self, retriever: SochDBRetriever):
+        self.retriever = retriever
+    
+    def share_finding(self, agent_name: str, finding: str):
+        """Agent shares finding with the crew."""
+        doc = f"[{agent_name}]: {finding}"
+        self.retriever.add_documents([doc])
+    
+    def get_crew_findings(self, query: str) -> List[str]:
+        """Retrieve findings from other agents."""
+        return self.retriever.search(query, k=5)
+```
+
+## Advanced Patterns
+
+### Hierarchical Crews
+
+```python
+# Manager agent coordinates sub-crews
+manager = Agent(
+    role="Project Manager",
+    goal="Coordinate research and writing teams",
+    tools=[SochDBSearchTool(retriever)]
+)
+
+# Research sub-crew
+research_crew = Crew(
+    agents=[researcher1, researcher2],
+    tasks=[research_task1, research_task2]
+)
+
+# Writing sub-crew
+writing_crew = Crew(
+    agents=[writer, editor],
+    tasks=[write_task, edit_task]
+)
+
+# Main crew
+main_crew = Crew(
+    agents=[manager],
+    tasks=[coordinate_task],
+    manager_llm=llm_config
+)
+```
+
+### Dynamic Tool Selection
+
+```python
+class DynamicSochDBTool(BaseTool):
+    def __init__(self, retriever, collection: str):
+        super().__init__()
+        self.retriever = retriever
+        self.collection = collection
+    
+    def _run(self, query: str) -> str:
+        # Search specific collection
+        results = self.retriever.search(
+            query,
+            k=3,
+            filter={"collection": self.collection}
+        )
+        return "\n\n".join(results)
+
+# Create specialized tools
+technical_tool = DynamicSochDBTool(retriever, "technical_docs")
+business_tool = DynamicSochDBTool(retriever, "business_docs")
+```
+
+## Performance Optimization
+
+### Batch Knowledge Updates
+
+```python
+def update_knowledge_batch(retriever, new_findings: List[str]):
+    """Batch update knowledge base for efficiency."""
+    retriever.add_documents(new_findings)
+```
+
+### Caching Agent Results
+
+```python
+from functools import lru_cache
+
+class CachedRetriever:
+    def __init__(self, retriever):
+        self.retriever = retriever
+    
+    @lru_cache(maxsize=100)
+    def search(self, query: str, k: int = 3) -> tuple:
+        results = self.retriever.search(query, k)
+        return tuple(results)  # Must be hashable for cache
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="LangGraph" href="/examples/langgraph" icon="diagram-project">
+    Compare with LangGraph patterns
+  </Card>
+  <Card title="Agent Memory" href="/examples/agent-memory" icon="brain">
+    Deep dive into memory systems
+  </Card>
+  <Card title="RAG System" href="/examples/rag-system" icon="magnifying-glass">
+    Build comprehensive RAG
+  </Card>
+  <Card title="Multi-Tenant" href="/examples/multi-tenant" icon="users">
+    Multi-tenant CrewAI systems
+  </Card>
+</CardGroup>

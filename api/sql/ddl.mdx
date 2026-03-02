@@ -1,0 +1,396 @@
+---
+title: "DDL (Data Definition Language)"
+description: "CREATE, DROP, and ALTER table statements in SochDB"
+---
+
+SochDB supports SQL-92 compliant DDL (Data Definition Language) for defining and managing database schemas. All DDL statements are part of the AST-based query executor with dialect normalization.
+
+## CREATE TABLE
+
+Create a new table with columns and constraints.
+
+### Basic Syntax
+
+```sql
+CREATE TABLE users (
+  id INTEGER,
+  name TEXT,
+  email TEXT,
+  age INTEGER
+);
+```
+
+### IF NOT EXISTS
+
+Create table only if it doesn't already exist (idempotent operation):
+
+```sql
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER,
+  name TEXT,
+  email TEXT
+);
+```
+
+**Behavior:** No-op if the table already exists. Returns success without error.
+
+### Multiple Columns
+
+```sql
+CREATE TABLE employees (
+  id INTEGER,
+  first_name TEXT,
+  last_name TEXT,
+  salary REAL,
+  department TEXT,
+  hire_date TEXT,
+  active INTEGER
+);
+```
+
+### With Constraints
+
+```sql
+CREATE TABLE products (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  price REAL CHECK (price > 0),
+  stock INTEGER DEFAULT 0,
+  category TEXT
+);
+```
+
+## Data Types
+
+SochDB supports SQL-92 standard data types plus AI-native extensions.
+
+### Numeric Types
+
+| Type | Description | Example |
+|------|-------------|--------|
+| `TINYINT` | 8-bit signed integer | `-128` to `127` |
+| `SMALLINT` | 16-bit signed integer | `-32768` to `32767` |
+| `INT` / `INTEGER` | 32-bit signed integer | `-2147483648` to `2147483647` |
+| `BIGINT` | 64-bit signed integer | Large integers |
+| `FLOAT` | Single precision floating point | `3.14` |
+| `DOUBLE` | Double precision floating point | `3.141592653589793` |
+| `DECIMAL(p,s)` | Fixed-point decimal | `DECIMAL(10,2)` for money |
+
+### String Types
+
+| Type | Description | Example |
+|------|-------------|--------|
+| `CHAR(n)` | Fixed-length string | `CHAR(10)` |
+| `VARCHAR(n)` | Variable-length string | `VARCHAR(255)` |
+| `TEXT` | Unlimited text | Long strings |
+
+### Binary Types
+
+| Type | Description |
+|------|-------------|
+| `BINARY(n)` | Fixed-length binary data |
+| `VARBINARY(n)` | Variable-length binary data |
+| `BLOB` | Binary large object |
+
+### Date/Time Types
+
+| Type | Description |
+|------|-------------|
+| `DATE` | Date values |
+| `TIME` | Time of day |
+| `TIMESTAMP` | Date and time |
+| `DATETIME` | Date and time |
+| `INTERVAL` | Time interval |
+
+### Other Types
+
+| Type | Description |
+|------|-------------|
+| `BOOLEAN` | True/false values |
+| `JSON` | JSON data |
+| `JSONB` | Binary JSON (PostgreSQL-compatible) |
+
+### SochDB Extensions
+
+AI-native data types for embeddings and vector search:
+
+```sql
+CREATE TABLE documents (
+  id INTEGER,
+  content TEXT,
+  embedding VECTOR(1536),      -- 1536-dimensional vector
+  summary_embedding EMBEDDING(384)  -- 384-dimensional embedding
+);
+```
+
+| Type | Description | Example |
+|------|-------------|--------|
+| `VECTOR(n)` | n-dimensional vector for similarity search | `VECTOR(1536)` |
+| `EMBEDDING(n)` | n-dimensional embedding | `EMBEDDING(384)` |
+
+## Column Constraints
+
+### NOT NULL
+
+```sql
+CREATE TABLE users (
+  id INTEGER NOT NULL,
+  email TEXT NOT NULL
+);
+```
+
+### PRIMARY KEY
+
+```sql
+CREATE TABLE users (
+  id INTEGER PRIMARY KEY,
+  name TEXT
+);
+```
+
+### UNIQUE
+
+```sql
+CREATE TABLE users (
+  id INTEGER,
+  email TEXT UNIQUE
+);
+```
+
+### DEFAULT
+
+```sql
+CREATE TABLE orders (
+  id INTEGER,
+  status TEXT DEFAULT 'pending',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### CHECK
+
+```sql
+CREATE TABLE products (
+  id INTEGER,
+  price REAL CHECK (price > 0),
+  stock INTEGER CHECK (stock >= 0)
+);
+```
+
+### FOREIGN KEY
+
+```sql
+CREATE TABLE orders (
+  id INTEGER,
+  user_id INTEGER REFERENCES users(id),
+  product_id INTEGER REFERENCES products(id)
+);
+```
+
+### AUTO_INCREMENT
+
+```sql
+CREATE TABLE users (
+  id INTEGER PRIMARY KEY AUTO_INCREMENT,
+  name TEXT
+);
+```
+
+## Table Constraints
+
+### Composite Primary Key
+
+```sql
+CREATE TABLE user_roles (
+  user_id INTEGER,
+  role_id INTEGER,
+  PRIMARY KEY (user_id, role_id)
+);
+```
+
+### Named Constraints
+
+```sql
+CREATE TABLE users (
+  id INTEGER,
+  email TEXT,
+  age INTEGER,
+  CONSTRAINT pk_users PRIMARY KEY (id),
+  CONSTRAINT uq_email UNIQUE (email),
+  CONSTRAINT chk_age CHECK (age >= 18)
+);
+```
+
+### Foreign Key with Actions
+
+```sql
+CREATE TABLE orders (
+  id INTEGER,
+  user_id INTEGER,
+  FOREIGN KEY (user_id) REFERENCES users(id)
+    ON DELETE CASCADE
+    ON UPDATE CASCADE
+);
+```
+
+## DROP TABLE
+
+Remove a table from the database.
+
+### Basic Syntax
+
+```sql
+DROP TABLE users;
+```
+
+**Error:** Fails if the table does not exist.
+
+### IF EXISTS
+
+```sql
+DROP TABLE IF EXISTS users;
+```
+
+**Behavior:** No-op if the table doesn't exist. Returns success without error.
+
+### Drop Multiple Tables
+
+```sql
+DROP TABLE users, products, orders;
+```
+
+### With CASCADE
+
+```sql
+DROP TABLE users CASCADE;
+```
+
+**Behavior:** Also drops dependent objects (views, foreign keys, etc.).
+
+## ALTER TABLE
+
+<Warning>
+ALTER TABLE has **partial support**. Only ADD COLUMN is fully implemented.
+</Warning>
+
+### Add Column
+
+```sql
+ALTER TABLE users ADD COLUMN phone TEXT;
+```
+
+### Add Column with Constraints
+
+```sql
+ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'active';
+```
+
+### Not Yet Supported
+
+The following ALTER TABLE operations are **not yet implemented**:
+
+- `DROP COLUMN`
+- `ALTER COLUMN` (change type, set default, etc.)
+- `RENAME COLUMN`
+- `RENAME TABLE`
+- `ADD CONSTRAINT`
+- `DROP CONSTRAINT`
+
+## CREATE INDEX
+
+Create an index to optimize query performance.
+
+### Basic Syntax
+
+```sql
+CREATE INDEX idx_email ON users (email);
+```
+
+### Unique Index
+
+```sql
+CREATE UNIQUE INDEX idx_email ON users (email);
+```
+
+### IF NOT EXISTS
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_email ON users (email);
+```
+
+### Multi-Column Index
+
+```sql
+CREATE INDEX idx_name ON users (last_name, first_name);
+```
+
+### Partial Index
+
+```sql
+CREATE INDEX idx_active_users ON users (email) WHERE active = 1;
+```
+
+### Index Types
+
+```sql
+-- B-Tree index (default)
+CREATE INDEX idx_id ON users (id) USING BTREE;
+
+-- Vector index (SochDB extension)
+CREATE INDEX idx_embedding ON documents (embedding) USING HNSW;
+```
+
+Supported index types:
+- `BTREE` - Default for scalar values
+- `HASH` - Hash index
+- `HNSW` - Vector similarity search (SochDB extension)
+- `VAMANA` - Vector similarity search (SochDB extension)
+
+## DROP INDEX
+
+Remove an index from the database.
+
+### Basic Syntax
+
+```sql
+DROP INDEX idx_email;
+```
+
+### IF EXISTS
+
+```sql
+DROP INDEX IF EXISTS idx_email;
+```
+
+### With Table Name
+
+```sql
+DROP INDEX idx_email ON users;
+```
+
+## Limitations
+
+<Warning>
+**Current Limitations:**
+- ALTER TABLE only supports ADD COLUMN
+- No RENAME TABLE/COLUMN
+- Limited support for ALTER COLUMN operations
+- Triggers are not supported
+- Views are not yet implemented
+</Warning>
+
+## Complexity
+
+| Operation | Time Complexity | Notes |
+|-----------|-----------------|-------|
+| CREATE TABLE | O(1) | Catalog update |
+| DROP TABLE | O(N) | N = table rows |
+| CREATE INDEX | O(N log N) | N = table rows |
+| DROP INDEX | O(1) | Catalog update |
+| ALTER TABLE (ADD) | O(1) | Schema modification |
+
+## See Also
+
+- [DML (Data Manipulation)](/api/sql/dml) - INSERT, UPDATE, DELETE
+- [Queries](/api/sql/queries) - SELECT statements
+- [Transactions](https://sochdb.dev/docs) - ACID transaction support

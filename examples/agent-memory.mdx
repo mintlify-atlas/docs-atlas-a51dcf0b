@@ -1,0 +1,392 @@
+---
+title: 'Agent Memory with Graph Overlay'
+description: 'Build conversational agents with persistent memory and context retrieval using SochDB'
+---
+
+## Overview
+
+SochDB provides a unified memory system for AI agents that combines:
+- **KV Storage** for user preferences and state
+- **Vector Search** for semantic retrieval
+- **Context Queries** with automatic token budgeting
+
+This enables agents to maintain long-term memory and retrieve relevant context efficiently.
+
+## Use Case
+
+A conversational AI agent that:
+- Remembers user preferences and previous interactions
+- Retrieves relevant knowledge from a semantic knowledge base
+- Assembles prioritized context within token budgets
+- Maintains conversation history across sessions
+
+## Architecture
+
+```
+┌──────────────────┐
+│  Agent Request   │
+└────────┬─────────┘
+         │
+         ▼
+┌──────────────────────────────────┐
+│      SochDB Memory Layer          │
+├──────────────────────────────────┤
+│  KV Store         Vector Index   │
+│  ├─ Preferences   ├─ Knowledge   │
+│  ├─ State         ├─ Episodes    │
+│  └─ History       └─ Documents   │
+└────────┬─────────────────────────┘
+         │
+         ▼
+┌──────────────────┐
+│  Context Query   │
+│  (Token Budget)  │
+└────────┬─────────┘
+         │
+         ▼
+┌──────────────────┐
+│    LLM Call      │
+└──────────────────┘
+```
+
+## Complete Implementation
+
+<Steps>
+
+### Install Dependencies
+
+```bash
+pip install sochdb numpy requests
+```
+
+### Create Memory-Enabled Agent
+
+```python agent_with_memory.py
+import os
+import json
+import time
+from typing import List, Dict, TypedDict
+from dataclasses import dataclass
+import numpy as np
+import requests
+
+from sochdb import VectorIndex, Database
+
+@dataclass
+class ContextSection:
+    """A section of context for the LLM."""
+    name: str
+    content: str
+    priority: int
+    tokens: int
+
+class AgentState(TypedDict):
+    """Agent state."""
+    messages: List[Dict[str, str]]
+    context: str
+    user_id: str
+    retrieved_docs: List[Dict]
+
+class SochDBMemory:
+    """
+    SochDB-backed memory for AI agents.
+    
+    Provides:
+    - Vector storage for semantic search
+    - KV storage for user preferences and state
+    - Context queries with token budgeting
+    """
+    
+    def __init__(self, db_path: str = "agent_memory.db", dimension: int = 768):
+        self.dimension = dimension
+        
+        # Vector index for semantic search
+        self.index = VectorIndex(
+            dimension=dimension,
+            max_connections=16,
+            ef_construction=100
+        )
+        
+        # KV database for structured data
+        self.db = Database.open(db_path)
+        
+        self.documents = {}  # id -> document
+        self.next_id = 0
+    
+    def add_document(self, content: str, embedding: np.ndarray, metadata: Dict = None):
+        """Add a document with its embedding."""
+        doc_id = self.next_id
+        self.next_id += 1
+        
+        self.documents[doc_id] = {
+            "id": doc_id,
+            "content": content,
+            "metadata": metadata or {}
+        }
+        
+        # Insert into vector index
+        ids = np.array([doc_id], dtype=np.uint64)
+        vectors = embedding.reshape(1, -1).astype(np.float32)
+        self.index.insert_batch(ids, vectors)
+        
+        return doc_id
+    
+    def search(self, query_embedding: np.ndarray, k: int = 5) -> List[Dict]:
+        """Search for similar documents."""
+        results = self.index.search(query_embedding.astype(np.float32), k=k)
+        
+        docs = []
+        for doc_id, distance in results:
+            if doc_id in self.documents:
+                doc = self.documents[doc_id].copy()
+                doc["distance"] = distance
+                docs.append(doc)
+        
+        return docs
+    
+    def save_user_preference(self, user_id: str, key: str, value: str):
+        """Save user preference to KV store."""
+        path = f"users/{user_id}/prefs/{key}".encode()
+        with self.db.transaction() as txn:
+            txn.put(path, value.encode())
+    
+    def get_user_preference(self, user_id: str, key: str) -> str:
+        """Get user preference from KV store."""
+        path = f"users/{user_id}/prefs/{key}".encode()
+        with self.db.transaction() as txn:
+            value = txn.get(path)
+            return value.decode() if value else None
+    
+    def save_conversation_turn(self, user_id: str, turn_id: int, user_msg: str, assistant_msg: str):
+        """Save conversation turn."""
+        path = f"conversations/{user_id}/{turn_id}".encode()
+        data = json.dumps({"user": user_msg, "assistant": assistant_msg})
+        with self.db.transaction() as txn:
+            txn.put(path, data.encode())
+    
+    def build_context(
+        self,
+        query_embedding: np.ndarray,
+        user_id: str,
+        token_budget: int = 4000
+    ) -> str:
+        """
+        Build prioritized context for LLM.
+        
+        Priority levels:
+        - 0: System prompt (always included)
+        - 1: User preferences
+        - 2: Retrieved documents
+        """
+        sections = []
+        
+        # Priority 0: System prompt
+        system_prompt = "You are a helpful AI assistant with access to a knowledge base."
+        sections.append(ContextSection(
+            name="system",
+            content=system_prompt,
+            priority=0,
+            tokens=len(system_prompt.split())
+        ))
+        
+        # Priority 1: User preferences
+        lang = self.get_user_preference(user_id, "language") or "en"
+        prefs_text = f"User language: {lang}"
+        sections.append(ContextSection(
+            name="user_prefs",
+            content=prefs_text,
+            priority=1,
+            tokens=len(prefs_text.split())
+        ))
+        
+        # Priority 2: Retrieved documents
+        docs = self.search(query_embedding, k=5)
+        for i, doc in enumerate(docs):
+            doc_text = f"[Doc {i+1}]: {doc['content']}"
+            sections.append(ContextSection(
+                name=f"doc_{i}",
+                content=doc_text,
+                priority=2,
+                tokens=len(doc_text.split())
+            ))
+        
+        # Assemble context (respecting token budget)
+        sections.sort(key=lambda s: s.priority)
+        
+        context_parts = []
+        current_tokens = 0
+        
+        for section in sections:
+            if current_tokens + section.tokens <= token_budget:
+                context_parts.append(section.content)
+                current_tokens += section.tokens
+        
+        return "\n\n".join(context_parts)
+
+def mock_embedding(text: str, dimension: int = 768) -> np.ndarray:
+    """Generate a mock embedding for testing."""
+    np.random.seed(hash(text) % 2**32)
+    embedding = np.random.randn(dimension).astype(np.float32)
+    embedding /= np.linalg.norm(embedding)
+    return embedding
+
+def main():
+    print("Initializing agent with SochDB memory...")
+    
+    # Initialize memory
+    memory = SochDBMemory(db_path="agent_memory.db", dimension=768)
+    
+    # Add knowledge documents
+    knowledge = [
+        "SochDB uses a Trie-Columnar Hybrid storage engine for O(path) lookups.",
+        "SochDB implements HNSW with SIMD acceleration for fast vector similarity search.",
+        "Context queries allow building prioritized context sections with token budgets.",
+        "SochDB supports Model Context Protocol for seamless LLM tool integration.",
+        "SochDB achieves sub-millisecond search latency and 10K+ vectors/sec insert rate."
+    ]
+    
+    for doc in knowledge:
+        embedding = mock_embedding(doc)
+        memory.add_document(
+            content=doc,
+            embedding=embedding,
+            metadata={"type": "knowledge"}
+        )
+    
+    print(f"Indexed {len(knowledge)} knowledge documents")
+    
+    # Save user preferences
+    user_id = "alice"
+    memory.save_user_preference(user_id, "language", "en")
+    memory.save_user_preference(user_id, "expertise", "developer")
+    
+    # Simulate agent interaction
+    query = "What storage engine does SochDB use?"
+    query_embedding = mock_embedding(query)
+    
+    # Build context
+    context = memory.build_context(
+        query_embedding=query_embedding,
+        user_id=user_id,
+        token_budget=2000
+    )
+    
+    print(f"\nQuery: {query}")
+    print(f"\nContext assembled ({len(context.split())} tokens):")
+    print(context)
+    
+    # Save conversation turn
+    memory.save_conversation_turn(
+        user_id=user_id,
+        turn_id=1,
+        user_msg=query,
+        assistant_msg="SochDB uses a Trie-Columnar Hybrid storage engine."
+    )
+    
+    print("\nConversation saved to memory")
+
+if __name__ == "__main__":
+    main()
+```
+
+### Run the Agent
+
+```bash
+python agent_with_memory.py
+```
+
+</Steps>
+
+## Key Features
+
+### Unified Memory Store
+
+```python
+# Vector storage for semantic search
+self.index = VectorIndex(dimension=768)
+
+# KV storage for structured data
+self.db = Database.open("agent_memory.db")
+```
+
+### Context Query with Token Budgeting
+
+```python
+def build_context(query_embedding, user_id, token_budget=4000):
+    sections = []
+    
+    # Priority 0: Always included
+    sections.append(ContextSection("system", system_prompt, priority=0, tokens=50))
+    
+    # Priority 1: User preferences
+    sections.append(ContextSection("prefs", user_prefs, priority=1, tokens=20))
+    
+    # Priority 2: Retrieved docs
+    docs = search(query_embedding, k=5)
+    for doc in docs:
+        sections.append(ContextSection(f"doc_{i}", doc, priority=2, tokens=100))
+    
+    # Assemble within budget
+    sections.sort(key=lambda s: s.priority)
+    context_parts = []
+    current_tokens = 0
+    
+    for section in sections:
+        if current_tokens + section.tokens <= token_budget:
+            context_parts.append(section.content)
+            current_tokens += section.tokens
+    
+    return "\n\n".join(context_parts)
+```
+
+### Conversation History
+
+```python
+def save_conversation_turn(user_id, turn_id, user_msg, assistant_msg):
+    """Persist conversation for future reference."""
+    path = f"conversations/{user_id}/{turn_id}".encode()
+    data = json.dumps({"user": user_msg, "assistant": assistant_msg})
+    with db.transaction() as txn:
+        txn.put(path, data.encode())
+```
+
+### User Preferences
+
+```python
+# Save preferences
+memory.save_user_preference("alice", "language", "en")
+memory.save_user_preference("alice", "expertise", "developer")
+
+# Retrieve preferences
+lang = memory.get_user_preference("alice", "language")
+```
+
+## Integration with LangGraph
+
+See the [LangGraph Integration](/examples/langgraph) example for complete workflow.
+
+## Performance
+
+| Operation | Latency |
+|-----------|--------|
+| Vector search (k=5) | 0.03ms |
+| KV get | 0.01ms |
+| Context assembly | 0.5ms |
+| Total agent overhead | {"<"}1ms |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="RAG System" href="/examples/rag-system" icon="magnifying-glass">
+    Build a complete RAG pipeline
+  </Card>
+  <Card title="LangGraph" href="/examples/langgraph" icon="diagram-project">
+    Integrate with LangGraph agents
+  </Card>
+  <Card title="Semantic Cache" href="/examples/semantic-cache" icon="database">
+    Add intelligent caching
+  </Card>
+  <Card title="Multi-Tenant" href="/examples/multi-tenant" icon="users">
+    Scale to multiple users
+  </Card>
+</CardGroup>

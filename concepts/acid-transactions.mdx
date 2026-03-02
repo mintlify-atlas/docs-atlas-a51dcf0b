@@ -1,0 +1,476 @@
+---
+title: "ACID Transactions"
+description: "MVCC, WAL durability, and isolation levels in SochDB"
+---
+
+## Overview
+
+SochDB provides **full ACID guarantees** using Multi-Version Concurrency Control (MVCC) and Write-Ahead Logging (WAL). This ensures your data remains consistent even during crashes, concurrent access, or complex multi-step operations.
+
+<Info>
+SochDB implements **Serializable Snapshot Isolation (SSI)**—the highest isolation level—preventing all anomalies including write skew.
+</Info>
+
+## ACID Guarantees
+
+| Property | Implementation | Benefit |
+|----------|----------------|------|
+| **Atomicity** | Buffered writes with all-or-nothing commit | Operations either fully succeed or fully fail |
+| **Consistency** | Schema validation before commit | Data always matches constraints |
+| **Isolation** | MVCC snapshots with read/write set tracking | Transactions don't interfere with each other |
+| **Durability** | WAL with fsync, group commit support | Committed data survives crashes |
+
+## Multi-Version Concurrency Control (MVCC)
+
+**MVCC** allows multiple readers and writers to operate concurrently without blocking each other. Each transaction sees a consistent snapshot of the database.
+
+### How MVCC Works
+
+```
+Timeline:
+───────────────────────────────────────────────────────>
+
+T=0   T=10  T=20  T=30  T=40  T=50
+│     │     │     │     │     │
+│     Txn1  │     │     │     │
+│     starts│     │     │     │
+│     ↓     │     │     │     │
+│     Reads │     │     │     │
+│     (sees │     Txn2  │     │
+│     T=10  │     starts│     │
+│     snapshot)   ↓     │     │
+│           │     Writes│     │
+│           │     (not  │     │
+│           │     visible     │
+│           │     to Txn1)    │
+│           │           Commit│
+│           │                 ↓
+│           Commit            T=50
+│           ↓
+│           T=30
+```
+
+**Key insight**: Each transaction gets its own **snapshot timestamp** at start. It only sees data committed before that timestamp.
+
+### MVCC in Code
+
+```rust
+use sochdb::{SochConnection, IsolationLevel};
+
+let conn = SochConnection::open("./data")?;
+
+// Transaction 1: Read account balance
+let txn1 = conn.begin()?;
+let balance = conn.get_in_txn(txn1, "accounts/alice/balance")?;
+println!("Balance: {}", String::from_utf8_lossy(&balance));
+
+// Transaction 2: Update the same account (concurrent)
+let txn2 = conn.begin()?;
+conn.put_in_txn(txn2, "accounts/alice/balance", b"1000")?;
+conn.commit(txn2)?;  // ← Txn2 commits
+
+// Transaction 1 still sees old value (snapshot isolation)
+let balance_again = conn.get_in_txn(txn1, "accounts/alice/balance")?;
+assert_eq!(balance, balance_again);  // Same as before!
+
+conn.commit(txn1)?;
+```
+
+<Note>
+MVCC eliminates read locks. Readers never block writers, and writers never block readers.
+</Note>
+
+## Write-Ahead Logging (WAL)
+
+The **WAL** ensures durability: every change is logged to disk before being applied. If the database crashes, the WAL is replayed to recover committed transactions.
+
+### WAL Record Structure
+
+```rust
+pub struct WalRecord {
+    pub lsn: LogSequenceNumber,      // Unique log sequence number
+    pub prev_lsn: LogSequenceNumber, // Previous LSN for this txn (undo chain)
+    pub txn_id: TransactionId,       // Transaction identifier
+    pub record_type: WalRecordType,  // Begin/Commit/Update/etc.
+    pub page_id: Option<PageId>,     // Affected page
+    pub redo_data: Bytes,            // How to redo this change
+    pub undo_data: Bytes,            // How to undo this change
+    pub checksum: u32,               // CRC32 checksum
+}
+```
+
+### WAL Record Types
+
+| Type | Description | Contains |
+|------|-------------|----------|
+| `Begin` | Transaction start | `txn_id`, timestamp |
+| `Commit` | Transaction commit | `txn_id`, commit timestamp |
+| `Abort` | Transaction rollback | `txn_id` |
+| `Update` | Data modification | `page_id`, redo/undo data |
+| `Insert` | New data | `page_id`, redo data |
+| `Delete` | Data removal | `page_id`, undo data |
+| `Checkpoint` | Consistency point | Active txn list |
+
+### WAL Example
+
+```rust
+use sochdb::SochConnection;
+
+let conn = SochConnection::open("./data")?;
+
+let txn = conn.begin()?;
+
+// Each operation writes to WAL before modifying data:
+// 1. WAL: Begin(txn_id=42, ts=100)
+conn.put_in_txn(txn, "users/1/name", b"Alice")?;
+// 2. WAL: Update(txn_id=42, page_id=5, redo=b"Alice", undo=b"")
+
+conn.put_in_txn(txn, "users/1/email", b"alice@example.com")?;
+// 3. WAL: Update(txn_id=42, page_id=5, redo=b"alice@example.com", undo=b"")
+
+conn.commit(txn)?;
+// 4. WAL: Commit(txn_id=42, ts=105)
+// 5. fsync() - force to disk
+
+// Now crash-safe: even if power fails here, recovery will replay these logs
+```
+
+### Recovery Process
+
+```
+1. Crash occurs
+   ↓
+2. On restart, scan WAL from last checkpoint
+   ↓
+3. Build transaction table:
+   - Begin records → mark txn as active
+   - Commit records → mark txn as committed
+   - Abort records → mark txn as aborted
+   ↓
+4. Redo phase:
+   - Replay all redo_data for committed txns
+   ↓
+5. Undo phase:
+   - Rollback all undo_data for active txns (crashed mid-flight)
+   ↓
+6. Database is consistent again ✓
+```
+
+<Info>
+Recovery time: Typically {"<"}100ms for 1GB of WAL. SochDB uses checkpoints to limit replay cost.
+</Info>
+
+## Isolation Levels
+
+SochDB supports multiple isolation levels, allowing you to trade consistency for performance:
+
+| Level | Dirty Read | Non-Repeatable Read | Phantom Read | Write Skew | Status |
+|-------|-----------|---------------------|--------------|-----------|--------|
+| **Read Uncommitted** | ✅ Possible | ✅ Possible | ✅ Possible | ✅ Possible | ✅ Implemented |
+| **Read Committed** | ❌ Prevented | ✅ Possible | ✅ Possible | ✅ Possible | ✅ Implemented |
+| **Snapshot Isolation** | ❌ Prevented | ❌ Prevented | ❌ Prevented | ✅ Possible | ✅ Implemented (default) |
+| **Serializable (SSI)** | ❌ Prevented | ❌ Prevented | ❌ Prevented | ❌ Prevented | ✅ Implemented |
+
+### Choosing an Isolation Level
+
+<AccordionGroup>
+  <Accordion title="Read Committed (Fastest)">
+    **Use when**: You only need to see committed data, and occasional inconsistencies are acceptable.
+    
+    **Example**: Dashboard showing aggregate stats.
+    
+    ```rust
+    let txn = conn.begin_with_isolation(IsolationLevel::ReadCommitted)?;
+    ```
+  </Accordion>
+  
+  <Accordion title="Snapshot Isolation (Recommended)">
+    **Use when**: You need consistent reads throughout a transaction (default for most apps).
+    
+    **Example**: Generating a report that needs internally consistent data.
+    
+    ```rust
+    let txn = conn.begin()?; // Default is SnapshotIsolation
+    ```
+  </Accordion>
+  
+  <Accordion title="Serializable (Strictest)">
+    **Use when**: You need full serializability guarantees, preventing all anomalies.
+    
+    **Example**: Financial transactions, inventory management.
+    
+    ```rust
+    let txn = conn.begin_with_isolation(IsolationLevel::Serializable)?;
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Isolation Level Example
+
+```rust
+use sochdb::{SochConnection, IsolationLevel};
+
+let conn = SochConnection::open("./data")?;
+
+// Serializable isolation (prevents write skew)
+let txn = conn.begin_with_isolation(IsolationLevel::Serializable)?;
+
+// Read current inventory
+let qty: i64 = conn.get_in_txn(txn, "inventory/widget/quantity")?
+    .and_then(|b| String::from_utf8_lossy(&b).parse().ok())
+    .unwrap_or(0);
+
+if qty > 0 {
+    // Decrement inventory
+    conn.put_in_txn(txn, "inventory/widget/quantity", (qty - 1).to_string().as_bytes())?;
+    conn.put_in_txn(txn, "orders/123/status", b"confirmed")?;
+} else {
+    return Err("Out of stock".into());
+}
+
+conn.commit(txn)?;
+// SSI validates no conflicts occurred during transaction
+```
+
+## Serializable Snapshot Isolation (SSI)
+
+**SSI** prevents all anomalies by tracking read/write sets and detecting dangerous structures:
+
+### How SSI Works
+
+```rust
+pub struct TransactionInfo {
+    id: TransactionId,
+    snapshot_ts: Timestamp,
+    read_set: Vec<(u32, u64)>,   // (table_id, row_id)
+    write_set: Vec<(u32, u64)>,  // (table_id, row_id)
+    // ...
+}
+
+// On commit, check for rw-antidependency cycles
+fn check_serialization_conflicts(&self, read_set: &[(u32, u64)], write_set: &[(u32, u64)]) -> Result<()> {
+    // If another transaction wrote to our read set,
+    // and we wrote to their read set → abort
+    for (table_id, row_id) in read_set {
+        if self.has_concurrent_writer(*table_id, *row_id) {
+            return Err(SerializationConflict);
+        }
+    }
+    Ok(())
+}
+```
+
+### SSI Example: Preventing Write Skew
+
+**Scenario**: Two doctors can't both be on-call unless at least one other is available.
+
+```rust
+use sochdb::{SochConnection, IsolationLevel};
+
+let conn = SochConnection::open("./data")?;
+
+// Transaction 1: Dr. Alice goes off-call
+let txn1 = conn.begin_with_isolation(IsolationLevel::Serializable)?;
+let on_call_count: i64 = conn.query_in_txn(txn1, "SELECT COUNT(*) FROM doctors WHERE on_call = true")?;
+
+if on_call_count > 1 {
+    conn.execute_in_txn(txn1, "UPDATE doctors SET on_call = false WHERE id = 'alice'")?;
+}
+
+// Transaction 2: Dr. Bob goes off-call (concurrent)
+let txn2 = conn.begin_with_isolation(IsolationLevel::Serializable)?;
+let on_call_count2: i64 = conn.query_in_txn(txn2, "SELECT COUNT(*) FROM doctors WHERE on_call = true")?;
+
+if on_call_count2 > 1 {
+    conn.execute_in_txn(txn2, "UPDATE doctors SET on_call = false WHERE id = 'bob'")?;
+}
+
+// Both try to commit
+conn.commit(txn1)?;  // ✓ First one succeeds
+conn.commit(txn2)?;  // ✗ Second one fails with SerializationConflict
+// This prevents leaving zero doctors on-call!
+```
+
+<Note>
+Without SSI, both transactions would commit and leave zero doctors on-call—a constraint violation!
+</Note>
+
+## WAL Sync Modes
+
+Control the durability vs. performance trade-off:
+
+```rust
+use sochdb_kernel::SyncMode;
+
+let config = DatabaseConfig {
+    sync_mode: SyncMode::Normal,  // Group commit (recommended)
+    // sync_mode: SyncMode::Full, // Fsync every commit (safest)
+    // sync_mode: SyncMode::Off,  // Periodic fsync (fastest)
+    ..Default::default()
+};
+```
+
+| Mode | Durability | Throughput | Use Case |
+|------|-----------|-----------|----------|
+| `Full` | Guaranteed | ~1K ops/sec | Financial, critical data |
+| `Normal` | Group commit | ~10K ops/sec | Most applications |
+| `Off` | Periodic fsync | ~100K ops/sec | Analytics, can tolerate loss |
+
+### Durability Presets
+
+SochDB provides pre-configured presets:
+
+```rust
+use sochdb::ConnectionConfig;
+
+// High-throughput batch processing
+let config = ConnectionConfig::throughput_optimized();
+
+// Low-latency real-time access
+let config = ConnectionConfig::latency_optimized();
+
+// Maximum durability (fsync every commit, no batching)
+let config = ConnectionConfig::max_durability();
+```
+
+| Preset | Sync Mode | Group Commit | Best For |
+|--------|-----------|--------------|----------|
+| `throughput_optimized()` | Normal | Large batches | High-volume ingestion |
+| `latency_optimized()` | Full | Small batches | Real-time applications |
+| `max_durability()` | Full | Disabled | Financial/critical data |
+
+## Group Commit
+
+**Group commit** batches multiple transactions into a single fsync call:
+
+```
+Without group commit:
+Txn1 → WAL write → fsync (5ms)
+Txn2 → WAL write → fsync (5ms)
+Txn3 → WAL write → fsync (5ms)
+Total: 15ms for 3 txns = 200 txn/sec
+
+With group commit:
+Txn1 → WAL write ┐
+Txn2 → WAL write ├→ Single fsync (5ms)
+Txn3 → WAL write ┘
+Total: 5ms for 3 txns = 600 txn/sec (3× faster)
+```
+
+### Group Commit Formula
+
+SochDB calculates optimal batch size using:
+
+```
+N* = √(2 × L_fsync × λ / C_wait)
+
+Where:
+- L_fsync = fsync latency (~5ms typical)
+- λ = arrival rate (ops/sec)
+- C_wait = cost per unit wait time
+```
+
+## Transaction Examples
+
+### Basic Transaction
+
+```rust
+use sochdb::SochConnection;
+
+let conn = SochConnection::open("./data")?;
+
+// Auto-commit (implicit transaction per operation)
+conn.put("users/1/name", b"Alice")?;
+
+// Explicit transaction
+let txn = conn.begin()?;
+conn.put_in_txn(txn, "users/1/name", b"Alice")?;
+conn.put_in_txn(txn, "users/1/email", b"alice@example.com")?;
+conn.commit(txn)?;  // Both writes committed atomically
+```
+
+### Rollback on Error
+
+```rust
+let txn = conn.begin()?;
+
+if let Err(e) = perform_updates(&conn, txn) {
+    conn.rollback(txn)?;  // Undo all changes
+    return Err(e);
+}
+
+conn.commit(txn)?;
+```
+
+### Bank Transfer (Atomic)
+
+```rust
+use sochdb::SochConnection;
+
+fn transfer(conn: &SochConnection, from: &str, to: &str, amount: i64) -> Result<()> {
+    let txn = conn.begin_with_isolation(IsolationLevel::Serializable)?;
+    
+    // Debit from account
+    let from_balance: i64 = conn.get_in_txn(txn, &format!("accounts/{}/balance", from))?
+        .and_then(|b| String::from_utf8_lossy(&b).parse().ok())
+        .ok_or("Account not found")?;
+    
+    if from_balance < amount {
+        conn.rollback(txn)?;
+        return Err("Insufficient funds".into());
+    }
+    
+    conn.put_in_txn(txn, &format!("accounts/{}/balance", from), (from_balance - amount).to_string().as_bytes())?;
+    
+    // Credit to account
+    let to_balance: i64 = conn.get_in_txn(txn, &format!("accounts/{}/balance", to))?
+        .and_then(|b| String::from_utf8_lossy(&b).parse().ok())
+        .ok_or("Account not found")?;
+    
+    conn.put_in_txn(txn, &format!("accounts/{}/balance", to), (to_balance + amount).to_string().as_bytes())?;
+    
+    conn.commit(txn)?;  // Atomic: both updates or neither
+    Ok(())
+}
+```
+
+## Performance Tips
+
+### Batch Operations
+
+```rust
+use sochdb::{SochConnection, BatchWriter};
+
+let conn = SochConnection::open("./data")?;
+
+// Batch insert with auto-commit
+let result = conn.batch()
+    .max_batch_size(1000)
+    .auto_commit(true)
+    .insert("events", vec![("id", id1), ("data", data1)])
+    .insert("events", vec![("id", id2), ("data", data2)])
+    .execute()?;
+
+println!("Executed: {}, Failed: {}", result.ops_executed, result.ops_failed);
+```
+
+### Read-Only Transactions
+
+```rust
+// Read-only transactions don't need to track write set
+let txn = conn.begin_readonly()?;
+let data = conn.get_in_txn(txn, "key")?;
+conn.commit(txn)?;  // Lightweight commit
+```
+
+## Related Concepts
+
+<CardGroup cols={2}>
+  <Card title="Architecture" icon="diagram-project" href="/concepts/architecture">
+    Learn about SochDB's kernel and WAL design
+  </Card>
+  
+  <Card title="TOON Format" icon="table" href="/concepts/toon-format">
+    Efficient serialization for LLM context
+  </Card>
+</CardGroup>

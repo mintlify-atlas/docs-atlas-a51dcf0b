@@ -1,0 +1,319 @@
+---
+title: 'Queries'
+description: 'Path queries, context queries, and SQL execution'
+---
+
+## PathQuery
+
+Path-based queries with O(|path|) resolution, independent of data size.
+
+### Basic Usage
+
+```rust
+use sochdb::prelude::*;
+
+let conn = Connection::open("./data")?;
+
+// Query with filter
+let result = conn.query("users")
+    .filter("score", CompareOp::Gt, 80)
+    .limit(100)
+    .to_toon()?;
+```
+
+### Filter Operations
+
+```rust
+pub enum CompareOp {
+    Eq,   // Equal
+    Gt,   // Greater than
+    Lt,   // Less than
+    Gte,  // Greater than or equal
+    Lte,  // Less than or equal
+    Ne,   // Not equal
+}
+```
+
+**Example:**
+
+```rust
+let users = conn.query("users")
+    .filter("age", CompareOp::Gte, 18)
+    .filter("status", CompareOp::Eq, "active")
+    .execute()?;
+```
+
+### Output Formats
+
+```rust
+pub enum OutputFormat {
+    Soch,      // TOON format (40-66% fewer tokens)
+    Json,      // JSON (for compatibility)
+    Columnar,  // Raw columnar (for analytics)
+}
+```
+
+#### to_toon()
+
+Convert results to token-efficient TOON format:
+
+```rust
+let result = conn.query("users")
+    .limit(100)
+    .to_toon()?;
+
+println!("Tokens: {}", result.metrics().soch_tokens);
+println!("Savings: {:.1}%", result.metrics().token_savings_percent());
+```
+
+**Token Efficiency:**
+
+- JSON: `{"field1": "val1", "field2": "val2"}`
+- TOON: `table[N]{f1,f2}: v1,v2`
+
+For 100 rows × 5 fields:
+- JSON: ~7,500 tokens
+- TOON: ~2,550 tokens (66% savings)
+
+## ContextQueryBuilder
+
+Build context queries for LLM prompts with token budget management.
+
+### Basic Context Query
+
+```rust
+let context = conn.context_query()
+    .from_session("session_id")
+    .with_token_limit(4000)
+    .user_section(|s| s.columns(&["query", "preferences"]).priority(1))
+    .history_section(|s| s.columns(&["recent"]).priority(2))
+    .execute()?;
+```
+
+### SectionBuilder
+
+Configure individual sections in the context:
+
+```rust
+pub struct SectionBuilder {
+    // ...
+}
+
+impl SectionBuilder {
+    pub fn columns(self, cols: &[&str]) -> Self;
+    pub fn priority(self, p: u8) -> Self;
+    pub fn limit(self, n: usize) -> Self;
+}
+```
+
+**Example:**
+
+```rust
+let context = conn.context_query()
+    .with_token_limit(8000)
+    .section("user", |s| {
+        s.columns(&["name", "preferences"])
+         .priority(1)
+         .limit(1)
+    })
+    .section("history", |s| {
+        s.columns(&["query", "response"])
+         .priority(2)
+         .limit(10)
+    })
+    .execute()?;
+```
+
+### ContextQueryResult
+
+Result type for context queries:
+
+```rust
+pub struct ContextQueryResult {
+    pub sections: Vec<SectionContent>,
+    pub total_tokens: usize,
+    pub truncated: bool,
+}
+
+pub struct SectionContent {
+    pub name: String,
+    pub content: String,
+    pub tokens: usize,
+}
+```
+
+**Example:**
+
+```rust
+let result = conn.context_query()
+    .with_token_limit(4000)
+    .execute()?;
+
+for section in result.sections {
+    println!("{}: {} tokens", section.name, section.tokens);
+}
+
+if result.truncated {
+    println!("Warning: Content was truncated to fit token budget");
+}
+```
+
+## SQL Execution
+
+### QueryExecutor
+
+Execute raw SOCH-QL queries:
+
+```rust
+pub trait QueryExecutor {
+    fn query_ast(&self, sql: &str) -> Result<QueryResult>;
+}
+```
+
+**Example:**
+
+```rust
+let result = conn.execute("SELECT * FROM users WHERE age > 18")?;
+```
+
+### QueryResult
+
+SQL query result type:
+
+```rust
+pub struct QueryResult {
+    pub rows: Vec<HashMap<String, SochValue>>,
+    pub rows_affected: usize,
+    pub execution_time_ms: u64,
+}
+```
+
+**Example:**
+
+```rust
+let result = conn.execute("SELECT name, age FROM users LIMIT 10")?;
+
+println!("Rows: {}", result.rows.len());
+println!("Execution time: {}ms", result.execution_time_ms);
+
+for row in result.rows {
+    let name = row.get("name").unwrap();
+    let age = row.get("age").unwrap();
+    println!("{}: {:?}", name, age);
+}
+```
+
+## Result Types
+
+### SochResult
+
+Wraps query results with metadata:
+
+```rust
+pub struct SochResult {
+    pub data: Vec<HashMap<String, SochValue>>,
+    pub metrics: ResultMetrics,
+}
+```
+
+### ResultMetrics
+
+Metrics for query results:
+
+```rust
+pub struct ResultMetrics {
+    pub soch_tokens: usize,
+    pub json_tokens: usize,
+    pub rows_scanned: usize,
+    pub rows_returned: usize,
+}
+
+impl ResultMetrics {
+    pub fn token_savings_percent(&self) -> f64 {
+        if self.json_tokens == 0 {
+            return 0.0;
+        }
+        ((self.json_tokens - self.soch_tokens) as f64 / self.json_tokens as f64) * 100.0
+    }
+}
+```
+
+**Example:**
+
+```rust
+let result = conn.query("users")
+    .limit(100)
+    .to_toon()?;
+
+let metrics = result.metrics();
+println!("Scanned: {} rows", metrics.rows_scanned);
+println!("Returned: {} rows", metrics.rows_returned);
+println!("Token savings: {:.1}%", metrics.token_savings_percent());
+```
+
+## ColumnarQueryResult
+
+Columnar format for analytics workloads:
+
+```rust
+pub struct ColumnarQueryResult {
+    pub columns: HashMap<String, Vec<SochValue>>,
+    pub row_count: usize,
+}
+```
+
+**Example:**
+
+```rust
+let result = conn.query("users")
+    .select(&["name", "age"])
+    .columnar()?;
+
+// Access columns directly
+let names = result.columns.get("name").unwrap();
+let ages = result.columns.get("age").unwrap();
+
+for i in 0..result.row_count {
+    println!("{}: {:?}", names[i], ages[i]);
+}
+```
+
+## SnapshotReader
+
+Read-only snapshot at a specific timestamp:
+
+```rust
+pub struct SnapshotReader<'a> {
+    // ...
+}
+
+impl<'a> SnapshotReader<'a> {
+    pub fn now(conn: &'a Connection) -> Result<Self>;
+    pub fn at_timestamp(conn: &'a Connection, ts: u64) -> Result<Self>;
+}
+```
+
+**Example:**
+
+```rust
+// Create snapshot at current time
+let snapshot = conn.snapshot()?;
+
+// Read from snapshot (won't see newer writes)
+let users = snapshot.query("users").execute()?;
+```
+
+## Performance Characteristics
+
+| Operation | Complexity | Notes |
+|-----------|-----------|-------|
+| Path query | O(\|path\|) | Independent of data size |
+| Full scan | O(N) | With columnar optimization |
+| Filtered scan | O(N) | With predicate pushdown |
+| Context query | O(S × M) | S = sections, M = rows per section |
+
+## See Also
+
+- [Connection](/api/rust/connection) - Database connections
+- [Batch Operations](/api/rust/batch-operations) - Bulk writes
+- [Vectors](/api/rust/vectors) - Vector search

@@ -1,0 +1,540 @@
+---
+title: "Vector Search"
+description: "HNSW indexing, distance metrics, and high-performance similarity search"
+---
+
+## Overview
+
+SochDB includes a high-performance **HNSW (Hierarchical Navigable Small World)** index for approximate nearest neighbor search. This enables semantic search, RAG workflows, and embedding-based retrieval—all within the same database.
+
+<Info>
+SochDB's HNSW implementation provides **250× speedup** over brute force while maintaining **98.99% recall@100** on standard benchmarks.
+</Info>
+
+## What is HNSW?
+
+**HNSW** is a graph-based algorithm for approximate nearest neighbor (ANN) search. It builds a multi-layer graph where:
+- **Top layers**: Sparse, long-range connections (for fast global navigation)
+- **Bottom layer**: Dense, local connections (for precise local search)
+
+### How HNSW Works
+
+```
+Layer 2 (top):     A ──────────────────────→ B
+                   │                          │
+                   │                          │
+Layer 1:           A ────→ C ────→ D ────→ B
+                   │       │       │       │
+                   │       │       │       │  
+Layer 0 (bottom):  A → X → C → Y → D → Z → B → ...
+                   ↑                           ↑
+                 Entry                      Query finds
+                 point                      nearest here
+```
+
+**Search algorithm**:
+1. Start at entry point in top layer
+2. Greedily navigate to closest node
+3. Drop to next layer
+4. Repeat until reaching Layer 0
+5. Perform local search at bottom layer
+
+<Note>
+The hierarchical structure makes search **O(log N)** instead of **O(N)** for brute force.
+</Note>
+
+## Quick Start
+
+### Creating an Index
+
+```rust
+use sochdb_index::{HNSWIndex, HNSWConfig, DistanceMetric};
+
+// Create index with default parameters
+let mut index = HNSWIndex::new(
+    384,  // Vector dimension
+    DistanceMetric::Cosine,
+);
+
+// Or with custom configuration
+let config = HNSWConfig {
+    m: 16,                          // Max connections per layer
+    m_max: 32,                      // Max connections at layer 0
+    ef_construction: 200,           // Build-time search width
+    ef_search: 50,                  // Query-time search width
+    metric: DistanceMetric::Cosine,
+    ..Default::default()
+};
+
+let mut index = HNSWIndex::with_config(config);
+```
+
+### Inserting Vectors
+
+```rust
+use sochdb::VectorCollection;
+
+let conn = SochConnection::open("./vectors")?;
+
+// Insert single vector
+let embedding: Vec<f32> = get_embedding("Hello world");
+conn.vector_insert("documents", 1, &embedding, Some(metadata))?;
+
+// Batch insert (faster)
+let embeddings: Vec<(u64, Vec<f32>)> = generate_embeddings(texts);
+for (id, vec) in embeddings {
+    index.insert(id, vec);
+}
+
+// Build the index (optimizes graph structure)
+index.build();
+```
+
+### Searching
+
+```rust
+use sochdb::SearchResult;
+
+let query_embedding = get_embedding("machine learning");
+let results: Vec<SearchResult> = conn.vector_search(
+    "documents",
+    &query_embedding,
+    10  // k = top 10
+)?;
+
+for result in results {
+    println!("ID: {}, Distance: {:.4}", result.id, result.distance);
+}
+```
+
+## Distance Metrics
+
+SochDB supports three distance metrics optimized with SIMD:
+
+| Metric | Formula | Use Case | Range |
+|--------|---------|----------|-------|
+| **Cosine** | `1 - (a·b)/(‖a‖‖b‖)` | Text embeddings, normalized vectors | [0, 2] |
+| **Euclidean** | `√Σ(aᵢ-bᵢ)²` | Spatial data, unnormalized vectors | [0, ∞) |
+| **Dot Product** | `-a·b` | Pre-normalized vectors, recommendation | (-∞, ∞) |
+
+### Choosing a Metric
+
+<AccordionGroup>
+  <Accordion title="Cosine (Recommended for Text)">
+    **Use when**: Working with text embeddings from models like OpenAI, Cohere, or sentence transformers.
+    
+    **Why**: Cosine measures angle between vectors, ignoring magnitude. Text embeddings are typically normalized.
+    
+    ```rust
+    let config = HNSWConfig {
+        metric: DistanceMetric::Cosine,
+        ..Default::default()
+    };
+    ```
+  </Accordion>
+  
+  <Accordion title="Euclidean (General Purpose)">
+    **Use when**: Vectors have meaningful magnitudes (e.g., spatial coordinates, unnormalized features).
+    
+    **Why**: L2 distance is the standard geometric distance in Euclidean space.
+    
+    ```rust
+    let config = HNSWConfig {
+        metric: DistanceMetric::Euclidean,
+        ..Default::default()
+    };
+    ```
+  </Accordion>
+  
+  <Accordion title="Dot Product (Pre-normalized)">
+    **Use when**: Vectors are already normalized (unit length) or you want inner product similarity.
+    
+    **Why**: Fastest computation; equivalent to cosine for unit vectors.
+    
+    ```rust
+    let config = HNSWConfig {
+        metric: DistanceMetric::DotProduct,
+        ..Default::default()
+    };
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Configuration Parameters
+
+### Core Parameters
+
+```rust
+pub struct HNSWConfig {
+    /// Max connections per layer (default: 16)
+    pub m: usize,
+    
+    /// Max connections at layer 0 (default: 32)
+    pub m_max: usize,
+    
+    /// Build-time search width (default: 200)
+    pub ef_construction: usize,
+    
+    /// Query-time search width (default: 50)
+    pub ef_search: usize,
+    
+    /// Distance metric
+    pub metric: DistanceMetric,
+}
+```
+
+### Parameter Guide
+
+| Parameter | Effect on Recall | Effect on Speed | Effect on Memory | Recommended Range |
+|-----------|-----------------|----------------|------------------|-------------------|
+| `m` | ↑ Higher = better | ↓ Higher = slower | ↑ Higher = more | 8-64 |
+| `m_max` | ↑ Higher = better | ↓ Higher = slower | ↑ Higher = more | 16-128 |
+| `ef_construction` | ↑ Higher = better | ↓ Higher = slower | → No effect | 100-400 |
+| `ef_search` | ↑ Higher = better | ↓ Higher = slower | → No effect | 10-500 |
+
+### Tuning Examples
+
+<CodeGroup>
+```rust High Recall (Accuracy Priority)
+let config = HNSWConfig {
+    m: 32,
+    m_max: 64,
+    ef_construction: 400,
+    ef_search: 200,
+    metric: DistanceMetric::Cosine,
+};
+// Recall: 99.5%+
+// Search: ~10ms
+// Memory: High
+```
+
+```rust Balanced (Recommended)
+let config = HNSWConfig {
+    m: 16,
+    m_max: 32,
+    ef_construction: 200,
+    ef_search: 50,
+    metric: DistanceMetric::Cosine,
+};
+// Recall: 98%+
+// Search: ~3-5ms
+// Memory: Medium
+```
+
+```rust High Speed (Latency Priority)
+let config = HNSWConfig {
+    m: 8,
+    m_max: 16,
+    ef_construction: 100,
+    ef_search: 20,
+    metric: DistanceMetric::Cosine,
+};
+// Recall: 95%+
+// Search: <2ms
+// Memory: Low
+```
+</CodeGroup>
+
+## Performance Characteristics
+
+### Complexity
+
+| Operation | Time Complexity | Space Complexity |
+|-----------|----------------|------------------|
+| Insert | O(log N × M × ef_construction) | O(N × M) |
+| Search | O(log N × ef_search) | O(ef_search) |
+| Delete | O(log N × M) | O(1) |
+
+### Benchmark Results (VectorDBBench)
+
+<Info>
+Dataset: OpenAI 50K × 1536D, Apple M1 Ultra
+</Info>
+
+| Metric | SochDB | ChromaDB | LanceDB (IVF_PQ) |
+|--------|--------|----------|------------------|
+| **Recall@100** | 0.9899 | 0.9966 | 0.6574 |
+| **Avg Latency** | **3.3 ms** | 15.4 ms | 5.6 ms |
+| **P95 Latency** | **4.2 ms** | 18.4 ms | 5.9 ms |
+| **P99 Latency** | **5.9 ms** | 22.3 ms | 12.2 ms |
+| **Insert (50K vecs)** | **0.1 s** | 76.9 s | 0.4 s |
+
+**Key findings:**
+- 🏎️ **4.7× faster search** than ChromaDB
+- ⚡ **769× faster inserts** than ChromaDB
+- 🎯 **98.99% recall** (within 1% of exact search)
+
+## High-Throughput Ingestion
+
+The Python SDK's `BatchAccumulator` provides **4-5× faster inserts** by deferring graph construction:
+
+```python
+from sochdb import VectorIndex
+import numpy as np
+
+index = VectorIndex(dimension=1536, max_connections=16, ef_construction=200)
+
+# Option 1: Context manager (auto-flush)
+with index.batch_accumulator(estimated_size=50_000) as acc:
+    acc.add(ids, vectors)   # Zero FFI, pure numpy memcpy
+# HNSW graph built in one shot on exit
+
+# Option 2: Explicit control
+acc = index.batch_accumulator(50_000)
+acc.add(chunk1_ids, chunk1_vecs)
+acc.add(chunk2_ids, chunk2_vecs)
+inserted = acc.flush()  # Single bulk FFI call → full Rayon parallelism
+```
+
+### How BatchAccumulator Works
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                    BatchAccumulator Pipeline                       │
+├───────────────────────┬──────────────────────────────────────────┤
+│  Phase 1: Accumulate  │  Phase 2: Flush                          │
+│  ──────────────────── │  ─────────────────                        │
+│  • add(ids, vecs)     │  • Single insert_batch() FFI call        │
+│  • Pure numpy memcpy  │  • Full Rayon parallel HNSW build        │
+│  • Zero FFI calls     │  • Wave-parallel (32-node waves)         │
+│  • ~0.05 s for 50K    │  • Adaptive ef (capped at 48)            │
+│                       │  • ~13.7 s for 50K vectors               │
+└───────────────────────┴──────────────────────────────────────────┘
+```
+
+## Vector Quantization
+
+SochDB supports **Product Quantization (PQ)** for memory reduction:
+
+### Memory Savings
+
+| Precision | Memory | Search Latency | Recall Loss | Use Case |
+|-----------|--------|----------------|-------------|----------|
+| **F32** | 100% (baseline) | Baseline | 0% | Maximum precision |
+| **F16** | 50% | ~Same | {"<"}1% | General embeddings |
+| **BF16** | 50% | ~Same | {"<"}1% | ML model compatibility |
+| **PQ** | **3%** (32×) | +10-20% | 1-2% | Massive datasets |
+
+### PQ Example
+
+```rust
+use sochdb_index::{VamanaConfig, VamanaIndex, PQCodebooks};
+
+// Train PQ codebooks on sample vectors
+let codebooks = PQCodebooks::train(&sample_vectors, 20, 8);
+
+// Create Vamana index with PQ
+let config = VamanaConfig::default();
+let mut index = VamanaIndex::new(384, config);
+
+// Insert vectors (automatically PQ-encoded)
+for (id, vector) in vectors {
+    index.insert(id, vector);
+}
+
+// Search (PQ codes used for approximate distance)
+let results = index.search(&query_vector, 10);
+```
+
+### PQ Configuration
+
+```
+384-dim vector:
+┌────────────────────────────────────────┐
+│  [f32; 384] = 1536 bytes               │
+└────────────────────────────────────────┘
+           ↓ Product Quantization
+┌────────────────────────────────────────┐
+│  20 subvectors × 8-bit codes = 20 bytes│  (77× compression)
+│  + 256 centroids × 20 dims = 5KB       │  (shared across all vectors)
+└────────────────────────────────────────┘
+
+Memory per vector: 1536 bytes → 20 bytes
+Compression ratio: 77×
+```
+
+## Hybrid Search
+
+Combine vector similarity with keyword search:
+
+```rust
+use sochdb::CollectionConfig;
+
+// Create collection with hybrid search enabled
+let collection = db.create_collection(
+    CollectionConfig {
+        name: "documents",
+        dimension: 384,
+        metric: DistanceMetric::Cosine,
+        enable_hybrid_search: true,  // Enable BM25 keyword index
+        content_field: "text",
+    }
+)?;
+
+// Insert multi-vector document (chunked)
+collection.insert_multi(
+    id: "doc_123",
+    vectors: [chunk_emb_1, chunk_emb_2, chunk_emb_3],
+    metadata: {"title": "SochDB Guide"},
+    chunk_texts: ["Intro", "Body", "Conclusion"],
+    aggregate: "max"  // Use max score across chunks
+)?;
+
+// Hybrid search: vector + keyword with RRF fusion
+let results = collection.hybrid_search(
+    vector: query_embedding,
+    text_query: "database performance",
+    k: 10,
+    alpha: 0.7  // 70% vector, 30% keyword
+)?;
+```
+
+### Reciprocal Rank Fusion (RRF)
+
+```
+Vector results:     [doc_A, doc_B, doc_C, doc_D]
+Keyword results:    [doc_C, doc_A, doc_E, doc_F]
+                          ↓ RRF fusion
+Combined:           [doc_A, doc_C, doc_B, doc_E, ...]
+                    (balances both signals)
+```
+
+RRF formula: `score = Σ 1/(k + rank_i)` for k=60 (default)
+
+## Concurrency Model
+
+SochDB's HNSW uses **fine-grained locking** for thread-safety:
+
+```rust
+// Thread-safe concurrent operations
+let index = Arc::new(HNSWIndex::new(384, DistanceMetric::Cosine));
+
+// Multiple threads can insert simultaneously
+let handles: Vec<_> = (0..4).map(|thread_id| {
+    let index = Arc::clone(&index);
+    thread::spawn(move || {
+        for id in thread_id * 1000..(thread_id + 1) * 1000 {
+            index.insert(id, generate_vector());
+        }
+    })
+}).collect();
+
+for handle in handles {
+    handle.join().unwrap();
+}
+
+// Searches don't block inserts (readers don't block writers)
+let results = index.search(&query, 10);
+```
+
+### Lock-Free Guarantees
+
+- **Node storage**: DashMap (sharded RwLocks) for O(1) concurrent access
+- **Neighbor lists**: Per-layer RwLocks with version counters
+- **Deadlock-free**: Single lock ordering (one layer lock at a time)
+- **TOCTOU-safe**: Version counters prevent lost updates
+
+## Advanced Features
+
+### Filtered Search
+
+```rust
+// Search with metadata filter
+let results = index.search_filtered(
+    &query_embedding,
+    10,
+    |id, metadata| {
+        metadata.get("category") == Some(&"technology")
+            && metadata.get("year").and_then(|y| y.parse::<i32>().ok()) > Some(2020)
+    }
+)?;
+```
+
+### Adaptive ef_search
+
+```rust
+// Automatically tune ef_search for target recall
+let config = HNSWConfig {
+    adaptive_ef: true,
+    target_recall: 0.95,  // 95% recall
+    ..Default::default()
+};
+```
+
+### Multi-Vector Documents
+
+```rust
+// Insert document with multiple chunk embeddings
+collection.insert_multi(
+    id: "doc_456",
+    vectors: vec![chunk1_emb, chunk2_emb, chunk3_emb],
+    metadata: {"title": "Advanced Guide"},
+    aggregate: "max"  // Options: max, mean, first
+)?;
+
+// Search returns best-matching chunk score
+```
+
+## Real-World Example: RAG Pipeline
+
+```rust
+use sochdb::{Database, CollectionConfig, DistanceMetric};
+
+// 1. Create database and collection
+let db = Database::open("./rag_db")?;
+let collection = db.create_collection(
+    CollectionConfig {
+        name: "knowledge_base",
+        dimension: 1536,  // OpenAI text-embedding-3-small
+        metric: DistanceMetric::Cosine,
+        enable_hybrid_search: true,
+        content_field: "text",
+    }
+)?;
+
+// 2. Index documents
+for doc in documents {
+    let embedding = openai_embed(&doc.text)?;
+    collection.insert(
+        doc.id,
+        embedding,
+        doc.metadata,
+        doc.text,
+    )?;
+}
+
+// 3. Retrieve context for LLM
+let user_question = "How does SochDB handle transactions?";
+let query_emb = openai_embed(user_question)?;
+
+let results = collection.hybrid_search(
+    vector: query_emb,
+    text_query: user_question,
+    k: 5,
+    alpha: 0.8  // Favor semantic similarity
+)?;
+
+// 4. Build context with token budget
+let context = ContextQueryBuilder::new()
+    .with_budget(4000)
+    .section("KNOWLEDGE", 0)
+        .from_results(results)
+        .format(ContextFormat::Soch)
+        .done()
+    .execute()?;
+
+// 5. Send to LLM
+let prompt = format!("Context:\n{}\n\nQuestion: {}", context, user_question);
+```
+
+## Related Concepts
+
+<CardGroup cols={2}>
+  <Card title="Architecture" icon="diagram-project" href="/concepts/architecture">
+    Learn about SochDB's index integration with storage
+  </Card>
+  
+  <Card title="TOON Format" icon="table" href="/concepts/toon-format">
+    Efficient serialization for retrieval results
+  </Card>
+</CardGroup>

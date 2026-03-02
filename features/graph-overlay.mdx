@@ -1,0 +1,626 @@
+---
+title: 'Graph Overlay'
+description: 'Lightweight graph layer on top of SochDB for agent memory, entity relationships, and conversation tracking'
+icon: 'diagram-project'
+---
+
+## Overview
+
+The Graph Overlay provides a lightweight graph abstraction on top of SochDB's key-value storage. It's designed for **agent memory** use cases: tracking conversations, entities, actions, and their relationships without the complexity of a full graph database.
+
+<Note>
+**Why Graph Overlay?** Traditional graph databases are heavy (Neo4j, ArangoDB). SochDB's Graph Overlay gives you graph operations (BFS, DFS, shortest path) on top of your existing embedded database with O(1) node/edge operations.
+</Note>
+
+## Key Features
+
+- **Node & Edge Storage**: Store entities and relationships with properties
+- **Graph Traversal**: BFS, DFS, shortest path with configurable depth limits
+- **Neighbor Queries**: Find connected nodes with edge type filtering
+- **Namespace Isolation**: Separate graphs per agent/tenant
+- **No External Dependencies**: Runs in your existing SochDB instance
+
+## Storage Model
+
+The graph is stored using SochDB's path-based storage:
+
+```
+_graph/{namespace}/nodes/{node_id} → {type, properties}
+_graph/{namespace}/edges/{from}/{edge_type}/{to} → {properties}
+_graph/{namespace}/index/{edge_type}/{to}/{from} → {from_id}  (reverse index)
+```
+
+This enables:
+- **O(1) node lookup**: Direct path access
+- **O(degree) neighbor queries**: Prefix scan on edges
+- **O(1) edge operations**: No graph rebuild needed
+
+## Quick Start
+
+### Python
+
+<CodeGroup>
+```python Agent Conversation Memory
+from sochdb import Database, GraphOverlay
+
+db = Database.open("./agent_db")
+graph = GraphOverlay(db, namespace="agent_001")
+
+# Track a conversation as a graph
+graph.add_node("msg_1", node_type="message", properties={
+    "role": "user",
+    "content": "What's the weather in San Francisco?",
+    "timestamp": "2024-03-15T10:00:00Z"
+})
+
+graph.add_node("msg_2", node_type="message", properties={
+    "role": "assistant",
+    "content": "Let me check the weather for you."
+})
+
+graph.add_node("tool_1", node_type="tool_call", properties={
+    "tool": "weather_api",
+    "location": "San Francisco",
+    "result": "Sunny, 72°F"
+})
+
+graph.add_node("msg_3", node_type="message", properties={
+    "role": "assistant",
+    "content": "It's sunny and 72°F in San Francisco."
+})
+
+# Link the conversation flow
+graph.add_edge("msg_1", "msg_2", edge_type="triggers")
+graph.add_edge("msg_2", "tool_1", edge_type="invokes")
+graph.add_edge("tool_1", "msg_3", edge_type="provides_context")
+
+# Traverse the conversation
+path = graph.bfs("msg_1", max_depth=10)
+print(f"Conversation flow: {' → '.join(path)}")
+# Output: msg_1 → msg_2 → tool_1 → msg_3
+```
+
+```python Entity Relationship Tracking
+from sochdb import GraphOverlay
+
+db = Database.open("./crm_db")
+graph = GraphOverlay(db, namespace="knowledge_graph")
+
+# Add entities
+graph.add_node("person_alice", node_type="person", properties={
+    "name": "Alice Smith",
+    "email": "alice@example.com",
+    "role": "Engineer"
+})
+
+graph.add_node("company_acme", node_type="company", properties={
+    "name": "Acme Corp",
+    "industry": "Technology"
+})
+
+graph.add_node("project_ai", node_type="project", properties={
+    "name": "AI Initiative",
+    "budget": 500000
+})
+
+# Add relationships
+graph.add_edge("person_alice", "company_acme", edge_type="works_at", properties={
+    "start_date": "2020-01-15",
+    "department": "Engineering"
+})
+
+graph.add_edge("person_alice", "project_ai", edge_type="leads", properties={
+    "role": "Tech Lead"
+})
+
+graph.add_edge("company_acme", "project_ai", edge_type="sponsors")
+
+# Find all entities connected to Alice
+neighbors = graph.get_neighbors("person_alice", direction="both")
+for neighbor in neighbors:
+    node = graph.get_node(neighbor.node_id)
+    print(f"Alice → {neighbor.edge.edge_type} → {node.properties['name']}")
+# Output:
+# Alice → works_at → Acme Corp
+# Alice → leads → AI Initiative
+```
+
+```python Action Dependency Graph
+from sochdb import GraphOverlay
+
+db = Database.open("./agent_db")
+graph = GraphOverlay(db, namespace="agent_planner")
+
+# Build agent action graph
+graph.add_node("action_1", node_type="search", properties={
+    "query": "best Italian restaurants",
+    "results_count": 15
+})
+
+graph.add_node("action_2", node_type="filter", properties={
+    "criteria": "rating > 4.5",
+    "results_count": 5
+})
+
+graph.add_node("action_3", node_type="rank", properties={
+    "method": "distance_to_user",
+    "top_result": "La Trattoria"
+})
+
+# Create dependency chain
+graph.add_edge("action_1", "action_2", edge_type="feeds_into")
+graph.add_edge("action_2", "action_3", edge_type="feeds_into")
+
+# Find all dependencies from root action
+deps = graph.dfs("action_1", max_depth=10)
+print(f"Action pipeline: {deps}")
+# Output: ['action_1', 'action_2', 'action_3']
+```
+</CodeGroup>
+
+### Rust
+
+```rust
+use sochdb::graph::{GraphOverlay, GraphNode, GraphEdge};
+use sochdb::Connection;
+use std::collections::HashMap;
+
+let conn = Connection::open("./agent_memory")?;
+let graph = GraphOverlay::new(conn, "agent_001");
+
+// Create nodes
+let mut props = HashMap::new();
+props.insert("role".to_string(), serde_json::json!("user"));
+props.insert("content".to_string(), serde_json::json!("Hello"));
+
+graph.add_node("msg_1", "message", Some(props))?;
+
+// Create edges
+graph.add_edge("msg_1", "replied_to", "msg_2", None)?;
+
+// Traverse
+let path = graph.shortest_path("msg_1", "msg_5", 10, None)?;
+println!("Path: {:?}", path);
+```
+
+## Core Operations
+
+### Node Operations
+
+<Tabs>
+  <Tab title="Add Node">
+    ```python
+    node = graph.add_node(
+        node_id="user_123",
+        node_type="User",
+        properties={
+            "name": "Alice",
+            "email": "alice@example.com",
+            "created_at": "2024-03-15T10:00:00Z"
+        }
+    )
+    ```
+  </Tab>
+  <Tab title="Get Node">
+    ```python
+    node = graph.get_node("user_123")
+    if node:
+        print(f"Name: {node.properties['name']}")
+        print(f"Type: {node.node_type}")
+    ```
+  </Tab>
+  <Tab title="Update Node">
+    ```python
+    # Update properties (merge)
+    graph.update_node(
+        "user_123",
+        properties={"last_login": "2024-03-15T15:30:00Z"},
+        node_type=None  # Keep existing type
+    )
+    
+    # Change type
+    graph.update_node(
+        "user_123",
+        properties=None,
+        node_type="Admin"
+    )
+    ```
+  </Tab>
+  <Tab title="Delete Node">
+    ```python
+    # Delete node only
+    graph.delete_node("user_123", cascade=False)
+    
+    # Delete node and all connected edges
+    graph.delete_node("user_123", cascade=True)
+    ```
+  </Tab>
+</Tabs>
+
+### Edge Operations
+
+<Tabs>
+  <Tab title="Add Edge">
+    ```python
+    edge = graph.add_edge(
+        from_id="user_123",
+        to_id="company_456",
+        edge_type="works_at",
+        properties={
+            "start_date": "2020-01-15",
+            "department": "Engineering"
+        }
+    )
+    ```
+  </Tab>
+  <Tab title="Get Edge">
+    ```python
+    edge = graph.get_edge("user_123", "works_at", "company_456")
+    if edge:
+        print(f"Start date: {edge.properties['start_date']}")
+    ```
+  </Tab>
+  <Tab title="Get All Edges">
+    ```python
+    # All outgoing edges from a node
+    edges = graph.get_edges("user_123")
+    
+    # Outgoing edges of specific type
+    work_edges = graph.get_edges("user_123", edge_type="works_at")
+    
+    # All incoming edges to a node
+    incoming = graph.get_incoming_edges("company_456")
+    
+    # Incoming edges of specific type
+    employees = graph.get_incoming_edges("company_456", edge_type="works_at")
+    ```
+  </Tab>
+  <Tab title="Delete Edge">
+    ```python
+    deleted = graph.delete_edge("user_123", "works_at", "company_456")
+    if deleted:
+        print("Edge removed")
+    ```
+  </Tab>
+</Tabs>
+
+## Graph Traversal
+
+### Breadth-First Search (BFS)
+
+Explore nodes level by level (nearest neighbors first):
+
+```python
+# Find all nodes reachable from msg_1 within 3 hops
+nodes = graph.bfs(
+    start_id="msg_1",
+    max_depth=3,
+    edge_types=None,  # All edge types
+    node_types=None   # All node types
+)
+print(f"Reachable nodes: {nodes}")
+# Output: ['msg_1', 'msg_2', 'tool_1', 'msg_3', 'msg_4']
+
+# Filter by edge type
+conversation_flow = graph.bfs(
+    start_id="msg_1",
+    max_depth=10,
+    edge_types=["triggers", "provides_context"],
+    node_types=None
+)
+
+# Filter by node type
+messages_only = graph.bfs(
+    start_id="msg_1",
+    max_depth=10,
+    edge_types=None,
+    node_types=["message"]
+)
+```
+
+### Depth-First Search (DFS)
+
+Explore as far as possible along each branch before backtracking:
+
+```python
+# Find all dependencies (action pipeline)
+actions = graph.dfs(
+    start_id="action_1",
+    max_depth=10,
+    edge_types=["feeds_into", "depends_on"],
+    node_types=["action"]
+)
+print(f"Action pipeline: {actions}")
+# Output: ['action_1', 'action_2', 'action_3', 'action_4']
+```
+
+### Shortest Path
+
+Find the shortest path between two nodes:
+
+```python
+path = graph.shortest_path(
+    from_id="user_alice",
+    to_id="project_ai",
+    max_depth=5,
+    edge_types=None  # Consider all edge types
+)
+
+if path:
+    print(f"Connection: {' → '.join(path)}")
+    # Output: user_alice → company_acme → project_ai
+else:
+    print("No path found")
+```
+
+### Neighbor Queries
+
+Find all directly connected nodes:
+
+```python
+from sochdb import EdgeDirection
+
+# Outgoing neighbors only
+outgoing = graph.get_neighbors(
+    "user_alice",
+    edge_types=None,
+    direction=EdgeDirection.OUTGOING
+)
+
+# Incoming neighbors only
+incoming = graph.get_neighbors(
+    "company_acme",
+    edge_types=["works_at"],
+    direction=EdgeDirection.INCOMING
+)
+
+# Both directions
+all_neighbors = graph.get_neighbors(
+    "user_alice",
+    edge_types=None,
+    direction=EdgeDirection.BOTH
+)
+
+for neighbor in all_neighbors:
+    node = graph.get_node(neighbor.node_id)
+    edge = neighbor.edge
+    print(f"{edge.edge_type}: {node.properties['name']}")
+```
+
+## Use Cases
+
+<AccordionGroup>
+  <Accordion title="Agent Conversation Memory (LangGraph/CrewAI)">
+    Track multi-turn conversations with tool calls and context:
+    
+    ```python
+    from sochdb import GraphOverlay
+    
+    graph = GraphOverlay(db, namespace=f"agent_{session_id}")
+    
+    # After each turn
+    msg_id = f"msg_{turn_number}"
+    graph.add_node(msg_id, "message", {
+        "role": role,
+        "content": content,
+        "timestamp": timestamp
+    })
+    
+    # Link to previous message
+    if prev_msg_id:
+        graph.add_edge(prev_msg_id, msg_id, "followed_by")
+    
+    # Link tool calls
+    if tool_call_id:
+        graph.add_edge(msg_id, tool_call_id, "invokes")
+        graph.add_edge(tool_call_id, next_msg_id, "provides_context")
+    
+    # Retrieve conversation context
+    history = graph.bfs(start_msg_id, max_depth=10, node_types=["message"])
+    context_msgs = [graph.get_node(nid) for nid in history]
+    ```
+    
+    **Why use graph?** Tracks causality (which message triggered which tool call), not just chronological order.
+  </Accordion>
+  
+  <Accordion title="Entity Knowledge Graph">
+    Build a lightweight knowledge graph of entities and relationships:
+    
+    ```python
+    # Extract entities from documents
+    graph.add_node("person_alice", "person", {"name": "Alice Smith"})
+    graph.add_node("company_acme", "company", {"name": "Acme Corp"})
+    graph.add_node("tech_python", "technology", {"name": "Python"})
+    
+    # Add relationships
+    graph.add_edge("person_alice", "company_acme", "works_at")
+    graph.add_edge("person_alice", "tech_python", "uses")
+    graph.add_edge("company_acme", "tech_python", "develops_in")
+    
+    # Query: "What technologies does Alice use?"
+    neighbors = graph.get_neighbors("person_alice", edge_types=["uses"])
+    technologies = [graph.get_node(n.node_id) for n in neighbors]
+    
+    # Query: "Who works at companies that use Python?"
+    python_companies = graph.get_neighbors("tech_python", 
+                                          edge_types=["develops_in"],
+                                          direction="incoming")
+    for company in python_companies:
+        employees = graph.get_neighbors(company.node_id,
+                                       edge_types=["works_at"],
+                                       direction="incoming")
+    ```
+  </Accordion>
+  
+  <Accordion title="Agent Planning & Execution Trace">
+    Track agent decision-making and action dependencies:
+    
+    ```python
+    # Planning phase
+    graph.add_node("plan_1", "plan", {
+        "goal": "Find best restaurant",
+        "steps": ["search", "filter", "rank"]
+    })
+    
+    # Execution phase
+    for step in plan.steps:
+        action_id = f"action_{step}"
+        graph.add_node(action_id, "action", {
+            "type": step,
+            "status": "completed",
+            "result": result_data
+        })
+        graph.add_edge("plan_1", action_id, "executes")
+        
+        if prev_action:
+            graph.add_edge(prev_action, action_id, "feeds_into")
+    
+    # Analyze execution trace
+    trace = graph.dfs("plan_1", max_depth=10, node_types=["action"])
+    
+    # Find failed actions
+    failed = graph.get_nodes_by_type("action", limit=100)
+    failed = [n for n in failed if n.properties.get("status") == "failed"]
+    ```
+  </Accordion>
+  
+  <Accordion title="Document Citation Graph">
+    Track document relationships and citations:
+    
+    ```python
+    # Add documents
+    graph.add_node("doc_1", "document", {
+        "title": "Database Design Patterns",
+        "author": "Alice"
+    })
+    
+    graph.add_node("doc_2", "document", {
+        "title": "Scalable Systems",
+        "author": "Bob"
+    })
+    
+    # Citation relationship
+    graph.add_edge("doc_2", "doc_1", "cites", {
+        "page": 42,
+        "context": "Database indexing strategies"
+    })
+    
+    # Find highly cited documents
+    citations = graph.get_incoming_edges("doc_1", edge_type="cites")
+    print(f"Document cited {len(citations)} times")
+    
+    # Citation chain
+    chain = graph.dfs("doc_1", max_depth=3, edge_types=["cites"])
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Performance
+
+| Operation | Time Complexity | Notes |
+|-----------|----------------|-------|
+| Add node | O(1) | Direct key write |
+| Get node | O(1) | Direct key read |
+| Add edge | O(1) | Two writes (edge + reverse index) |
+| Get edges | O(degree) | Prefix scan |
+| BFS/DFS | O(V + E) | Standard graph traversal |
+| Shortest path | O(V + E) | BFS-based |
+
+<Note>
+**Scalability**: Graph Overlay is optimized for agent memory (hundreds to thousands of nodes per agent). For very large graphs (millions of nodes), consider a dedicated graph database.
+</Note>
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use Namespaces" icon="layer-group">
+    Isolate graphs per agent/tenant:
+    ```python
+    # Per-agent memory
+    agent_graph = GraphOverlay(db, f"agent_{agent_id}")
+    
+    # Per-user knowledge
+    user_graph = GraphOverlay(db, f"user_{user_id}")
+    ```
+  </Card>
+  
+  <Card title="Meaningful Node IDs" icon="tag">
+    Use descriptive node IDs for debugging:
+    ```python
+    # Good
+    graph.add_node("msg_2024-03-15_001", "message", ...)
+    graph.add_node("user_alice_smith", "person", ...)
+    
+    # Avoid
+    graph.add_node("n_1", "message", ...)  # Unclear
+    ```
+  </Card>
+  
+  <Card title="Typed Edges" icon="arrow-right">
+    Use specific edge types for clarity:
+    ```python
+    # Good
+    graph.add_edge(msg1, msg2, "triggers")
+    graph.add_edge(msg2, tool, "invokes")
+    graph.add_edge(tool, msg3, "provides_context")
+    
+    # Avoid
+    graph.add_edge(msg1, msg2, "related")  # Vague
+    ```
+  </Card>
+  
+  <Card title="Limit Traversal Depth" icon="layer-group">
+    Always set `max_depth` to prevent runaway traversals:
+    ```python
+    # Good
+    nodes = graph.bfs(start, max_depth=10)
+    
+    # Dangerous (could traverse entire graph)
+    nodes = graph.bfs(start, max_depth=999999)
+    ```
+  </Card>
+</CardGroup>
+
+## Integration with Vector Search
+
+Combine graph structure with semantic search:
+
+```python
+from sochdb import Database, GraphOverlay
+
+db = Database.open("./agent_db")
+graph = GraphOverlay(db, "agent_memory")
+collection = db.namespace("agent_memory").collection("messages")
+
+# 1. Store message in vector collection
+collection.insert(
+    id="msg_42",
+    vector=embedding,
+    metadata={"content": "How do I optimize queries?"}
+)
+
+# 2. Store message in graph
+graph.add_node("msg_42", "message", {"content": "How do I optimize queries?"})
+
+# 3. Link to conversation
+graph.add_edge("msg_41", "msg_42", "followed_by")
+
+# 4. Hybrid retrieval: semantic search + graph context
+results = collection.search(query_embedding, k=5)
+top_msg_id = results[0].id
+
+# Get conversation context via graph
+context_ids = graph.bfs(top_msg_id, max_depth=3, node_types=["message"])
+context_msgs = [graph.get_node(nid) for nid in context_ids]
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Context Query" icon="layer-group" href="/features/context-query">
+    Use graph traversal results in context queries
+  </Card>
+  <Card title="Namespace Isolation" icon="shield" href="/features/namespace-isolation">
+    Learn about multi-tenant graph isolation
+  </Card>
+</CardGroup>

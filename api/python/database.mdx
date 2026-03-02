@@ -1,0 +1,282 @@
+---
+title: 'Database'
+description: 'Full key-value database API with ACID transactions and WAL durability'
+icon: 'database'
+---
+
+The `Database` class provides a complete key-value storage engine with ACID transactions, MVCC isolation, and crash recovery.
+
+## Opening a Database
+
+<ParamField path="path" type="str" required>
+  Path to the database directory. Creates the database if it doesn't exist.
+</ParamField>
+
+<ParamField path="config" type="str" default="default">
+  Configuration preset for performance tuning:
+  - `"default"` - Balanced durability and performance
+  - `"throughput"` - Optimized for high write throughput
+  - `"latency"` - Optimized for low commit latency
+  - `"durable"` - Maximum durability (fsync every commit)
+</ParamField>
+
+<CodeGroup>
+```python Basic
+from sochdb import Database
+
+# Open database (creates if not exists)
+db = Database.open("./my_db")
+```
+
+```python With Config
+from sochdb import Database
+
+# Throughput-optimized configuration
+db = Database.open("./my_db", config="throughput")
+```
+</CodeGroup>
+
+## Core Operations
+
+### put()
+
+Insert or update a key-value pair.
+
+<ParamField path="key" type="bytes" required>
+  Key as bytes
+</ParamField>
+
+<ParamField path="value" type="bytes" required>
+  Value as bytes
+</ParamField>
+
+<ParamField path="txn" type="int" default="None">
+  Optional transaction ID from `begin()`. If not provided, auto-commits immediately.
+</ParamField>
+
+<CodeGroup>
+```python Auto-commit
+db.put(b"user:1", b'{"name": "Alice"}')
+```
+
+```python Within Transaction
+txn = db.begin()
+db.put(b"user:1", b'{"name": "Alice"}', txn=txn)
+db.put(b"user:2", b'{"name": "Bob"}', txn=txn)
+db.commit(txn)
+```
+</CodeGroup>
+
+### get()
+
+Retrieve a value by key.
+
+<ParamField path="key" type="bytes" required>
+  Key to look up
+</ParamField>
+
+<ParamField path="txn" type="int" default="None">
+  Optional transaction ID for consistent reads
+</ParamField>
+
+<ResponseField name="return" type="bytes | None">
+  Value bytes if found, `None` otherwise
+</ResponseField>
+
+```python
+value = db.get(b"user:1")
+if value is not None:
+    print(value.decode())
+```
+
+### delete()
+
+Remove a key-value pair.
+
+<ParamField path="key" type="bytes" required>
+  Key to delete
+</ParamField>
+
+<ParamField path="txn" type="int" default="None">
+  Optional transaction ID
+</ParamField>
+
+```python
+db.delete(b"user:1")
+```
+
+### scan()
+
+Scan all keys with a given prefix.
+
+<ParamField path="prefix" type="bytes" required>
+  Key prefix to scan
+</ParamField>
+
+<ParamField path="txn" type="int" default="None">
+  Optional transaction ID for consistent reads
+</ParamField>
+
+<ResponseField name="return" type="List[Tuple[bytes, bytes]]">
+  List of (key, value) tuples matching the prefix
+</ResponseField>
+
+```python
+# Scan all users
+for key, value in db.scan(b"user:"):
+    print(f"{key.decode()}: {value.decode()}")
+```
+
+## Transaction Management
+
+### begin()
+
+Start a new transaction.
+
+<ResponseField name="return" type="int">
+  Transaction ID to pass to subsequent operations
+</ResponseField>
+
+### commit()
+
+Commit a transaction, making all writes durable.
+
+<ParamField path="txn" type="int" default="None">
+  Transaction ID from `begin()`. If `None`, commits current transaction.
+</ParamField>
+
+<ResponseField name="return" type="int">
+  Commit timestamp
+</ResponseField>
+
+### abort()
+
+Abort a transaction, discarding all writes.
+
+<ParamField path="txn" type="int" default="None">
+  Transaction ID from `begin()`. If `None`, aborts current transaction.
+</ParamField>
+
+<CodeGroup>
+```python Manual Transaction
+txn = db.begin()
+try:
+    db.put(b"key1", b"value1", txn=txn)
+    db.put(b"key2", b"value2", txn=txn)
+    db.commit(txn)
+except Exception:
+    db.abort(txn)
+    raise
+```
+
+```python Context Manager
+with db.transaction() as txn:
+    db.put(b"key1", b"value1", txn=txn)
+    db.put(b"key2", b"value2", txn=txn)
+    # Auto-commit on exit, auto-abort on exception
+```
+</CodeGroup>
+
+## Maintenance Operations
+
+### checkpoint()
+
+Create a checkpoint, allowing WAL truncation.
+
+<ResponseField name="return" type="int">
+  Checkpoint sequence number
+</ResponseField>
+
+```python
+seq = db.checkpoint()
+print(f"Checkpoint created: {seq}")
+```
+
+### gc()
+
+Run garbage collection to reclaim space from old versions.
+
+<ResponseField name="return" type="int">
+  Number of versions collected
+</ResponseField>
+
+```python
+collected = db.gc()
+print(f"Collected {collected} old versions")
+```
+
+### fsync()
+
+Force sync all committed data to disk.
+
+```python
+db.fsync()
+```
+
+### close()
+
+Close the database connection.
+
+```python
+db.close()
+```
+
+## Complete Example
+
+```python
+import json
+from sochdb import Database
+
+# Open database
+db = Database.open("./user_db")
+
+# Insert user profiles
+users = [
+    {"id": 1, "name": "Alice", "email": "alice@example.com"},
+    {"id": 2, "name": "Bob", "email": "bob@example.com"},
+]
+
+with db.transaction() as txn:
+    for user in users:
+        key = f"user:{user['id']}".encode()
+        value = json.dumps(user).encode()
+        db.put(key, value, txn=txn)
+
+# Retrieve a user
+user_data = db.get(b"user:1")
+if user_data:
+    user = json.loads(user_data.decode())
+    print(f"Found user: {user['name']}")
+
+# Scan all users
+print("All users:")
+for key, value in db.scan(b"user:"):
+    user = json.loads(value.decode())
+    print(f"  {user['name']} ({user['email']})")
+
+# Cleanup
+db.checkpoint()
+db.close()
+```
+
+## Performance Notes
+
+- **Auto-commit mode**: Each `put()`/`delete()` without a `txn` is automatically committed
+- **Batch operations**: Use explicit transactions for multiple operations to reduce fsync overhead
+- **Configuration presets**:
+  - `"throughput"` - Groups commits, higher latency but better throughput
+  - `"latency"` - Minimizes commit latency, lower throughput
+  - `"durable"` - Maximum safety, fsyncs every commit
+
+## Error Handling
+
+All methods raise `IOError` on failure:
+
+```python
+from sochdb import Database
+
+try:
+    db = Database.open("/invalid/path")
+except IOError as e:
+    print(f"Failed to open database: {e}")
+```

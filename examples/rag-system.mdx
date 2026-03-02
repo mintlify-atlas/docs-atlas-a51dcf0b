@@ -1,0 +1,339 @@
+---
+title: 'RAG System with SochDB'
+description: 'Build a production-ready RAG system with vector search, context assembly, and multi-tenant support'
+---
+
+## Overview
+
+This example demonstrates a complete RAG (Retrieval-Augmented Generation) system using SochDB. It combines vector search, metadata filtering, time-based reranking, and multi-tenant access control.
+
+## Use Case
+
+A customer support knowledge base where:
+- Multiple tenants (companies) share the same infrastructure
+- Documents have access levels (public, internal, admin)
+- Recent articles are prioritized over older ones
+- Users can filter by language and product category
+
+## Architecture
+
+```
+┌─────────────┐      ┌──────────────┐      ┌─────────────┐
+│   Query     │─────▶│  SochDB      │─────▶│  LLM        │
+│             │      │  Vector Index│      │  Generator  │
+└─────────────┘      └──────────────┘      └─────────────┘
+                            │
+                            ▼
+                     ┌──────────────┐
+                     │  Metadata    │
+                     │  Filtering   │
+                     │  + Time Decay│
+                     └──────────────┘
+```
+
+## Complete Implementation
+
+<Steps>
+
+### Install Dependencies
+
+```bash
+pip install sochdb numpy requests python-dotenv
+```
+
+### Set Up Environment
+
+Create a `.env` file:
+
+```bash
+AZURE_EMEBEDDING_ENDPOINT=https://your-resource.openai.azure.com/
+AZURE_EMEBEDDING_API_KEY=your-key
+AZURE_EMEBEDDING_DEPLOYMENT_NAME=text-embedding-3-small
+AZURE_EMEBEDDING_API_VERSION=2024-12-01-preview
+
+AZURE_OPENAI_API_BASE=https://your-resource.openai.azure.com/
+AZURE_OPENAI_API_KEY=your-key
+AZURE_OPENAI_DEPLOYMENT_NAME=gpt-4
+AZURE_OPENAI_API_VERSION=2025-01-01-preview
+```
+
+### Create the RAG System
+
+```python customer_support_rag.py
+import os
+import sys
+import json
+import time
+import random
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional
+from dataclasses import dataclass
+import numpy as np
+import requests
+from dotenv import load_dotenv
+
+from sochdb import VectorIndex
+
+load_dotenv()
+
+@dataclass
+class SupportArticle:
+    id: str
+    content: str
+    tenant_id: str
+    access_level: int  # 0=public, 1=internal, 2=admin
+    product: str
+    language: str
+    doc_type: str  # article, ticket, faq
+    created_at: datetime
+    embedding: Optional[np.ndarray] = None
+
+@dataclass
+class SearchResult:
+    article: SupportArticle
+    score: float
+    reranked_score: float = 0.0
+
+class CustomerSupportRAG:
+    """Multi-tenant customer support RAG with ACL and time decay."""
+    
+    def __init__(self):
+        self.dimension = 1536
+        self.index = VectorIndex(
+            dimension=self.dimension,
+            max_connections=32,
+            ef_construction=200
+        )
+        self.articles: Dict[str, SupportArticle] = {}
+        self.id_to_idx: Dict[str, int] = {}
+        self.idx_to_id: Dict[int, str] = {}
+        self.next_idx = 0
+        
+        # Azure embeddings
+        self.embed_endpoint = os.getenv("AZURE_EMEBEDDING_ENDPOINT")
+        self.embed_key = os.getenv("AZURE_EMEBEDDING_API_KEY")
+        self.embed_deployment = os.getenv("AZURE_EMEBEDDING_DEPLOYMENT_NAME", "embedding")
+        self.embed_version = os.getenv("AZURE_EMEBEDDING_API_VERSION", "2024-12-01-preview")
+    
+    def _embed(self, texts: List[str]) -> np.ndarray:
+        """Generate embeddings via Azure OpenAI."""
+        url = f"{self.embed_endpoint.rstrip('/')}/openai/deployments/{self.embed_deployment}/embeddings?api-version={self.embed_version}"
+        headers = {"api-key": self.embed_key, "Content-Type": "application/json"}
+        
+        all_embeddings = []
+        batch_size = 16
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i+batch_size]
+            response = requests.post(url, headers=headers, json={"input": batch})
+            response.raise_for_status()
+            embeddings = [item["embedding"] for item in response.json()["data"]]
+            all_embeddings.extend(embeddings)
+        
+        return np.array(all_embeddings, dtype=np.float32)
+    
+    def ingest(self, articles: List[SupportArticle]) -> int:
+        """Ingest articles into the index."""
+        texts = [a.content for a in articles]
+        embeddings = self._embed(texts)
+        
+        start_idx = self.next_idx
+        ids = np.arange(start_idx, start_idx + len(articles), dtype=np.uint64)
+        self.index.insert_batch(ids, embeddings)
+        
+        for i, article in enumerate(articles):
+            article.embedding = embeddings[i]
+            idx = start_idx + i
+            self.articles[article.id] = article
+            self.id_to_idx[article.id] = idx
+            self.idx_to_id[idx] = article.id
+        
+        self.next_idx += len(articles)
+        return len(articles)
+    
+    def search(
+        self,
+        query: str,
+        tenant_id: str,
+        user_access_level: int,
+        language: Optional[str] = None,
+        product: Optional[str] = None,
+        top_k: int = 10,
+        time_decay_days: int = 30
+    ) -> List[SearchResult]:
+        """Search with ACL filtering and time decay reranking."""
+        
+        query_embedding = self._embed([query])[0]
+        
+        # Over-fetch for filtering
+        k_fetch = top_k * 5
+        results = self.index.search(query_embedding, k=k_fetch)
+        
+        search_results = []
+        now = datetime.now()
+        
+        for idx, score in results:
+            article_id = self.idx_to_id.get(int(idx))
+            if not article_id or article_id not in self.articles:
+                continue
+            
+            article = self.articles[article_id]
+            
+            # ACL filtering
+            if article.tenant_id != tenant_id:
+                continue
+            if article.access_level > user_access_level:
+                continue
+            if language and article.language != language:
+                continue
+            if product and article.product != product:
+                continue
+            
+            # Time decay reranking
+            days_old = (now - article.created_at).days
+            decay = np.exp(-days_old / time_decay_days)
+            reranked_score = float(score) * (0.7 + 0.3 * decay)
+            
+            search_results.append(SearchResult(
+                article=article,
+                score=float(score),
+                reranked_score=reranked_score
+            ))
+            
+            if len(search_results) >= top_k:
+                break
+        
+        # Sort by reranked score
+        search_results.sort(key=lambda x: x.reranked_score, reverse=True)
+        return search_results
+
+# Example usage
+if __name__ == "__main__":
+    rag = CustomerSupportRAG()
+    
+    # Ingest sample articles
+    articles = [
+        SupportArticle(
+            id="art_1",
+            content="How to reset 2FA authentication for your account",
+            tenant_id="acme_corp",
+            access_level=0,  # Public
+            product="auth",
+            language="en",
+            doc_type="article",
+            created_at=datetime.now() - timedelta(days=5)
+        ),
+        SupportArticle(
+            id="art_2",
+            content="Billing invoice download and payment methods",
+            tenant_id="acme_corp",
+            access_level=1,  # Internal
+            product="billing",
+            language="en",
+            doc_type="faq",
+            created_at=datetime.now() - timedelta(days=30)
+        )
+    ]
+    
+    count = rag.ingest(articles)
+    print(f"Ingested {count} articles")
+    
+    # Search
+    results = rag.search(
+        query="How do I reset 2FA?",
+        tenant_id="acme_corp",
+        user_access_level=1,
+        language="en",
+        top_k=5
+    )
+    
+    print(f"\nFound {len(results)} results:")
+    for i, result in enumerate(results, 1):
+        print(f"{i}. [{result.score:.3f} → {result.reranked_score:.3f}] {result.article.content}")
+```
+
+### Run the System
+
+```bash
+python customer_support_rag.py
+```
+
+</Steps>
+
+## Key Features
+
+### Vector Search
+
+```python
+# High-performance HNSW index
+self.index = VectorIndex(
+    dimension=1536,
+    max_connections=32,  # Higher = better recall
+    ef_construction=200  # Higher = better index quality
+)
+```
+
+### Multi-Tenant Filtering
+
+```python
+# Strict tenant isolation
+if article.tenant_id != tenant_id:
+    continue
+if article.access_level > user_access_level:
+    continue
+```
+
+### Time Decay Reranking
+
+```python
+# Boost recent content
+days_old = (now - article.created_at).days
+decay = np.exp(-days_old / time_decay_days)
+reranked_score = float(score) * (0.7 + 0.3 * decay)
+```
+
+### Context Assembly for LLM
+
+```python
+def assemble_context(results: List[SearchResult], max_tokens: int = 2000) -> str:
+    """Assemble context for LLM from search results."""
+    context_parts = []
+    current_tokens = 0
+    
+    for result in results:
+        content = result.article.content
+        tokens = len(content.split())  # Rough estimate
+        
+        if current_tokens + tokens > max_tokens:
+            break
+        
+        context_parts.append(f"- {content}")
+        current_tokens += tokens
+    
+    return "\n".join(context_parts)
+```
+
+## Performance Characteristics
+
+| Metric | Value |
+|--------|-------|
+| Insert speed | 117,000 vectors/sec |
+| Search latency | 0.03ms |
+| Index quality | 99%+ recall@10 |
+| Concurrent users | 1000+ |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Agent Memory" href="/examples/agent-memory" icon="brain">
+    Add conversation tracking and memory
+  </Card>
+  <Card title="Semantic Cache" href="/examples/semantic-cache" icon="database">
+    Reduce costs with intelligent caching
+  </Card>
+  <Card title="Multi-Tenant" href="/examples/multi-tenant" icon="users">
+    Scale to multiple organizations
+  </Card>
+  <Card title="LangGraph" href="/examples/langgraph" icon="diagram-project">
+    Integrate with LangGraph agents
+  </Card>
+</CardGroup>

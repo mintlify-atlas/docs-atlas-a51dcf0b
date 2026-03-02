@@ -1,0 +1,301 @@
+---
+title: Installation
+description: Install SochDB SDK for Python, Node.js, Go, or Rust. Choose from package managers or Docker deployment.
+---
+
+# Installation
+
+SochDB provides SDKs for multiple languages, each maintained in separate repositories with their own release cycles. Choose your preferred language and follow the installation instructions below.
+
+## Python
+
+Install the Python SDK using pip:
+
+```bash
+pip install sochdb
+```
+
+### Verify installation
+
+```python
+from sochdb import Database
+
+# Open a test database
+db = Database.open("./test_db")
+db.put(b"test", b"Hello, SochDB!")
+print(db.get(b"test").decode())  # "Hello, SochDB!"
+db.close()
+```
+
+### Requirements
+
+- Python 3.8 or higher
+- pip package manager
+
+<Card title="Python SDK repository" icon="github" href="https://github.com/sochdb/sochdb-python-sdk">
+  View source code and examples
+</Card>
+
+## Node.js / TypeScript
+
+Install the Node.js SDK using npm or yarn:
+
+<CodeGroup>
+```bash npm
+npm install @sochdb/sochdb
+```
+
+```bash yarn
+yarn add @sochdb/sochdb
+```
+
+```bash pnpm
+pnpm add @sochdb/sochdb
+```
+</CodeGroup>
+
+### Verify installation
+
+```typescript
+import { Database } from '@sochdb/sochdb';
+
+// Open a test database
+const db = await Database.open('./test_db');
+await db.put('test', 'Hello, SochDB!');
+console.log(await db.get('test'));  // "Hello, SochDB!"
+await db.close();
+```
+
+### Requirements
+
+- Node.js 16 or higher
+- npm, yarn, or pnpm package manager
+
+<Card title="Node.js SDK repository" icon="github" href="https://github.com/sochdb/sochdb-nodejs-sdk">
+  View source code and examples
+</Card>
+
+## Go
+
+Install the Go SDK using `go get`:
+
+```bash
+go get github.com/sochdb/sochdb-go@latest
+```
+
+### Verify installation
+
+```go
+package main
+
+import (
+    "fmt"
+    sochdb "github.com/sochdb/sochdb-go"
+)
+
+func main() {
+    db, _ := sochdb.Open("./test_db")
+    defer db.Close()
+    
+    db.Put([]byte("test"), []byte("Hello, SochDB!"))
+    value, _ := db.Get([]byte("test"))
+    fmt.Println(string(value))  // "Hello, SochDB!"
+}
+```
+
+### Requirements
+
+- Go 1.19 or higher
+- Go modules enabled
+
+<Card title="Go SDK repository" icon="github" href="https://github.com/sochdb/sochdb-go">
+  View source code and examples
+</Card>
+
+## Rust
+
+Add SochDB to your `Cargo.toml`:
+
+```toml
+[dependencies]
+sochdb = "0.2"
+```
+
+Or use `cargo add`:
+
+```bash
+cargo add sochdb
+```
+
+### Verify installation
+
+```rust
+use sochdb::Database;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let db = Database::open("./test_db")?;
+    
+    db.put(b"test", b"Hello, SochDB!")?;
+    if let Some(value) = db.get(b"test")? {
+        println!("{}", String::from_utf8_lossy(&value));  // "Hello, SochDB!"
+    }
+    
+    Ok(())
+}
+```
+
+### Requirements
+
+- Rust 1.70 or higher
+- Cargo package manager
+
+<Card title="Rust SDK repository" icon="github" href="https://github.com/sochdb/sochdb">
+  View source code (main repository)
+</Card>
+
+## Docker deployment
+
+SochDB includes a production-ready Docker setup with gRPC server:
+
+### Quick start
+
+```bash
+# Pull and run from Docker Hub
+docker pull sushanth53/sochdb:latest
+docker run -d -p 50051:50051 sushanth53/sochdb:latest
+```
+
+### Docker Compose
+
+For production deployments with monitoring and load balancing:
+
+```bash
+# Clone the repository
+git clone https://github.com/sochdb/sochdb.git
+cd sochdb/docker
+
+# Start services
+docker compose up -d
+```
+
+### Docker features
+
+<CardGroup cols={2}>
+  <Card title="Production-ready" icon="check">
+    159MB optimized image with health checks
+  </Card>
+  <Card title="High availability" icon="circle-nodes">
+    Traefik load balancing and routing
+  </Card>
+  <Card title="Monitoring" icon="chart-line">
+    Prometheus metrics + Grafana dashboards
+  </Card>
+  <Card title="gRPC-Web support" icon="globe">
+    Envoy proxy for browser clients
+  </Card>
+</CardGroup>
+
+### Docker performance
+
+Tested on Apple M-series:
+
+| Metric | Performance |
+|--------|-------------|
+| Single-threaded | ~2K ops/sec |
+| Concurrent (10 threads) | ~10.5K ops/sec |
+| P99 latency | {"<"}2.2ms |
+
+<Note>
+See the [Docker README](https://github.com/sochdb/sochdb/blob/main/docker/README.md) for complete documentation.
+</Note>
+
+## SDK feature matrix
+
+All SDKs share the same core functionality:
+
+| Feature | Python | Node.js | Go | Rust |
+|---------|--------|---------|-----|------|
+| Basic KV operations | ✓ | ✓ | ✓ | ✓ |
+| Path API | ✓ | ✓ | ✓ | ✓ |
+| Transactions | ✓ | ✓ | ✓ | ✓ |
+| Vector search | ✓ | ✓ | ✓ | ✓ |
+| SQL operations | ✓ | ✓ | ✓ | ✓ |
+| Prefix scanning | ✓ | ✓ | ✓ | ✓ |
+| Query builder | ✓ | ✓ | ✓ | ✓ |
+
+## Examples and benchmarks
+
+Each SDK has its own examples repository:
+
+<CardGroup cols={2}>
+  <Card title="Python examples" icon="python" href="https://github.com/sochdb/sochdb-python-examples">
+    Explore Python code examples
+  </Card>
+  <Card title="Node.js examples" icon="node-js" href="https://github.com/sochdb/sochdb-nodejs-examples">
+    Explore Node.js/TypeScript examples
+  </Card>
+  <Card title="Go examples" icon="golang" href="https://github.com/sochdb/sochdb-golang-examples">
+    Explore Go code examples
+  </Card>
+  <Card title="Benchmarks" icon="chart-simple" href="https://github.com/sochdb/sochdb-benchmarks">
+    View performance comparisons
+  </Card>
+</CardGroup>
+
+## Deployment modes
+
+SochDB supports two deployment modes across all SDKs:
+
+### Embedded mode (FFI)
+
+**Default mode** - The database runs in the same process as your application:
+
+- **Lowest latency**: No IPC overhead
+- **Simplest deployment**: Single binary
+- **Best for**: Single-process applications, edge deployments
+
+```python
+# Python - embedded mode (default)
+db = Database.open("./my_db")
+```
+
+### IPC mode (Unix sockets)
+
+The database runs as a separate process:
+
+- **Multi-process**: Share database across multiple applications
+- **Service architecture**: Database as a standalone service
+- **Best for**: Microservices, multi-tenant deployments
+
+```python
+# Python - IPC mode
+db = Database.open_ipc("/var/run/sochdb.sock")
+```
+
+<Note>
+All SDKs support both embedded and IPC modes. Refer to individual SDK documentation for language-specific configuration.
+</Note>
+
+## System requirements
+
+SochDB has minimal system requirements:
+
+- **Memory**: ~700KB base footprint
+- **Disk**: Space for your data + write-ahead log
+- **OS**: Linux, macOS, Windows
+- **Architecture**: x86_64, ARM64
+
+<Warning>
+SochDB is currently **single-node only**. Replication and clustering are not yet supported.
+</Warning>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build your first SochDB application
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference">
+    Explore the complete API documentation
+  </Card>
+</CardGroup>

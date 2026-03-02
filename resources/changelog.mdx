@@ -1,0 +1,416 @@
+---
+title: 'Changelog'
+description: 'Version history and release notes for SochDB'
+icon: 'clock-rotate-left'
+---
+
+# Changelog
+
+All notable changes to SochDB are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+---
+
+<AccordionGroup>
+  <Accordion title="v0.5.0 - February 15, 2026" icon="star" defaultOpen>
+
+## Major Performance & Architecture Improvements
+
+### Changed
+
+#### Lock-Free Epoch GC (sochdb-core)
+
+- **Lock-free `ReaderRegistry`** — replaced `RwLock<HashMap<u64, u64>>` with a fixed-size array of 256 cache-line-aligned `AtomicU64` slots
+- **DashMap-backed `EpochGC`** — replaced `RwLock<HashMap<K, VersionChain<T>>>` with `DashMap` for the version chain store; GC cycle no longer takes a global write lock
+- **Strict less-than epoch visibility** — `version_at(epoch)` now uses `epoch < N` (was `<=`), consistent with MVCC snapshot semantics
+- **O(1) GC truncation** — `VersionChain::gc()` uses `truncate(kept)` instead of repeated `pop_back()`
+
+#### Consolidated MVCC Version Chain (sochdb-core, sochdb-storage)
+
+- **`BinarySearchChain<E>`** — new generic binary-search version chain that captures duplicated O(log V) logic
+- **`ChainEntry` trait** — abstraction for version entry types
+- **`MvccVersionChain` / `MvccVersionChainMut` traits** — unified read/write interface
+- **`MvccStore` trait** — unified store interface implemented by `MvccMemTable`
+
+#### HNSW Search: Zero-DashMap Hot Path (sochdb-index)
+
+- **AtomicU32 entry point** — eliminates DashMap lookup on every search
+- **Local `id→dense` cache** — per-query `HashMap<u128, u32>` cache from neighbor traversal
+- **Scratch buffer reuse** — thread-local buffers eliminate per-search heap allocations
+
+#### Lock-Free Fat-Node Version Chain (sochdb-storage)
+
+- **`FatNode` struct** — groups 8 version pointers per node (64 bytes = 1 cache line)
+- **`LockFreeVersionChain`** — reduces pointer chases from O(v) to O(v/8)
+
+#### SSI Conflict Detection (sochdb-storage)
+
+- **`InlineKey` (`SmallVec<[u8; 32]>`)** — stack-allocated keys for read/write sets
+- **256-bit Bloom filter** — fast-reject non-conflicting write sets
+- **DashMap-backed `SsiManager`** — concurrent shard-level access
+
+#### Real LZ4/Zstd Compression (sochdb-storage)
+
+- **LZ4 block compression** — replaced placeholder with `lz4_flex`
+- **Zstd compression** — configurable compression level
+- **Dedup hashing** — switched to `xxh3::hash64()` (~5× faster)
+
+#### LSCS Temperature Tracker (sochdb-storage)
+
+- **AtomicU64 hot threshold** — lock-free reads for hot-column detection
+- **Selective hot-column merge** — `compact_selective()` merges hot columns, references cold columns
+
+### Added
+
+#### Columnar Zero-Allocation Row Access
+
+- **`TypedColumn::value_at(idx)`** — extract single `SochValue` without materializing `HashMap`
+- **`ColumnarQueryResult::row_view(idx)`** — on-demand column value resolution
+- **`ColumnarRowView::get(column)`** — named-column access without `HashMap` overhead
+
+#### DurableStorage Fast-Path APIs
+
+- **`begin_read_only_fast()`** / **`abort_read_only_fast()`** — lightweight read transactions
+- **`read_latest(key)`** — single-key read at current timestamp
+- **`scan_latest(prefix)`** — prefix scan at current timestamp
+
+#### Knowledge Object Data Model (New Module)
+
+- **`knowledge_object.rs`** — content-addressed `KnowledgeObject` with BLAKE3 OID, embedded edges, multi-space embeddings
+
+#### New Crates
+
+- **sochdb-fusion** — fused query execution across vector, graph, and temporal predicates
+- **sochdb-bench** — Criterion micro-benchmark suite
+
+### Fixed
+
+- **Compression divide-by-zero** — added guard before ratio check in `CompressionEngine`
+
+</Accordion>
+
+  <Accordion title="v0.4.1 - January 19, 2026" icon="lock">
+
+## Critical Concurrency Safety Fix
+
+This release addresses the **66.5% data loss** issue from concurrent multi-process access.
+
+### Added
+
+#### Concurrency Safety (Critical Fix)
+
+- **Advisory File Locking (P0)** — Cross-platform exclusive database access
+  - POSIX `flock()` on Unix, `LockFileEx()` on Windows
+  - New `DatabaseLock` and `RwDatabaseLock` types
+  - Stale lock detection with PID tracking
+  - Configurable timeout and retry via `LockConfig`
+
+- **WAL Sequence Fencing (P0)** — Split-brain detection
+  - New 64-byte `WalHeader` with magic, epoch, and writer_id (UUID)
+  - Epoch-based fencing prevents stale writers from corrupting data
+  - CRC chain verification for entry integrity
+
+- **Reader-Writer Lock Protocol (P1)** — Multiple readers OR single writer
+  - `RwDatabaseLock` supports concurrent reads with exclusive writes
+
+- **Lock Timeout & Deadlock Detection (P1)** — Robust error handling
+  - Stale lock cleanup when holder PID no longer exists
+  - New error types: `LockError`, `DatabaseLocked`, `EpochMismatch`, `SplitBrain`
+
+- **Connection Mode Enforcement (P2)** — Type-safe read-only connections
+  - New `ReadOnlyConnection` type with compile-time write prevention
+
+#### SDK Updates
+
+- **Python SDK v0.4.1** — New lock error types and error codes (10xxx range)
+- **Node.js SDK v0.4.1** — New `ErrorCode` enum with lock error codes
+- **Go SDK v0.4.1** — New sentinel errors for lock conditions
+
+### Fixed
+
+- Crash recovery tests now properly release locks before reopening database
+
+</Accordion>
+
+  <Accordion title="v0.3.1 - January 4, 2026" icon="chart-line">
+
+## Analytics & Documentation Updates
+
+### Added
+
+- **Anonymous Usage Analytics** — Optional, privacy-respecting usage information collection
+  - `database_opened` and `error` events
+  - Stable anonymous machine ID (SHA-256 hash, no PII)
+  - Environment variable opt-out: `SOCHDB_DISABLE_ANALYTICS=true`
+  - Graceful degradation when analytics dependencies unavailable
+
+### Changed
+
+- **Analytics Privacy-First Design** — No sensitive data collection
+  - Error tracking sends only static `error_type` and `location`
+  - No dynamic error messages, user data, or identifiable information
+- **Documentation Updates** — Version references updated to 0.3.1 across all guides
+
+### Fixed
+
+- **JavaScript Analytics Import** — Fixed ESM import path (`.js` extension required)
+- **Rust Analytics Feature** — Enabled `analytics` feature by default in client crates
+- **Test Version Mismatch** — Updated JavaScript test expectations
+
+</Accordion>
+
+  <Accordion title="v0.3.0 - January 3, 2026" icon="cube">
+
+## Namespace Isolation & Hybrid Search
+
+### Added
+
+- **Namespace Isolation** — Type-safe multi-tenancy with logical database namespaces
+  - `Namespace` and `Collection` APIs for tenant-scoped data isolation
+  - Per-namespace configuration and collection management
+  - Available in Python, Go, Node.js, and Rust SDKs
+
+- **Hybrid Search** — Dense vector (HNSW) + sparse BM25 text search
+  - `HybridSearchEngine` with Reciprocal Rank Fusion (RRF)
+  - Configurable alpha weighting (vector vs. keyword balance)
+  - `InvertedIndex` for full-text search with BM25 scoring
+
+- **Multi-Vector Documents** — Multiple embeddings per document
+  - Store title, abstract, and content vectors separately
+  - Aggregation strategies: max-pooling, mean-pooling, weighted sum
+
+- **Context-Aware Queries** — LLM-optimized retrieval with token budgeting
+  - `ContextQuery` builder with fluent API
+  - Token estimation for GPT-4, Claude, Gemini models
+  - Semantic deduplication to avoid redundant results
+
+- **Tombstone-Based Deletion** — Logical deletion for vector indices
+  - Filtering during search without rebuilding index
+
+- **Enhanced Error Taxonomy** — 40+ specific error types with remediation hints
+
+### Changed
+
+- **SDK Documentation** — Comprehensive updates across all languages
+  - Removed version numbers from installation instructions
+  - Added "What's New in Latest Release" section
+  - Consistent documentation structure
+
+### Fixed
+
+- **Node.js VERSION Bug** — VERSION constant now matches package.json
+
+### Breaking Changes
+
+- Namespace API requires explicit namespace creation before use
+- Collection configuration is immutable after creation
+
+</Accordion>
+
+  <Accordion title="v0.2.9 - January 2, 2026" icon="chart-bar">
+
+## Comprehensive Benchmarks & Community Health
+
+### Added
+
+- **Comprehensive benchmark suite** with real-world LLM embeddings (Azure OpenAI)
+  - SochDB vs ChromaDB: **3× faster** vector search
+  - SochDB vs LanceDB: **22× faster** vector search
+  - Recall@k benchmarks showing **>98% recall** with sub-millisecond latency
+  - End-to-end RAG bottleneck analysis
+
+- **Full SQL engine support in Go SDK** with DDL/DML operations
+
+- **Community health files**
+  - CODE_OF_CONDUCT.md (Contributor Covenant v2.1)
+  - SECURITY.md with vulnerability reporting policy
+  - Issue templates (bug report, feature request, support)
+
+- **Unified release workflow** with automated SDK publishing
+
+- **360° performance report** with retrieval quality, latency, throughput metrics
+
+### Changed
+
+- Simplified release workflow with improved error handling
+- Updated documentation with consistent SDK guides
+
+### Fixed
+
+- Rust compilation errors in storage.rs
+- Go SDK test output formatting
+- Path dependencies for crates.io publishing
+
+</Accordion>
+
+  <Accordion title="v0.2.7 - January 1, 2026" icon="database">
+
+## Full SQL Support Across SDKs
+
+### Added
+
+- **Full SQL engine support** in Python SDK with DDL/DML operations
+- **Full SQL engine support** in JavaScript SDK
+- **Go embedded server mode** - auto starts/stops sochdb-server
+- **Transaction SQL support** - execute() method in Transaction class
+- SQL storage using KV backend with `_sql/tables/` prefix
+- WHERE clause support: =, !=, {"<"}, {">"}, {">"}=, {"<"}=, LIKE, NOT LIKE
+- ORDER BY with ASC/DESC, LIMIT, OFFSET
+- Data types: INT, TEXT, FLOAT, BOOL, BLOB
+
+### Changed
+
+- JavaScript stats() response format changed to valid JSON
+- Go SDK now defaults to embedded mode
+
+### Fixed
+
+- **Critical**: Python SQL API now returns actual query results
+- **Critical**: IPC server stats command returns valid JSON
+- **Critical**: Go SDK no longer requires external server process
+- JavaScript SDK ESM imports use explicit .js extensions
+
+</Accordion>
+
+  <Accordion title="v0.2.6 - January 1, 2026" icon="magnifying-glass">
+
+## Enhanced Scan & SQL Features
+
+### Added
+
+- **Enhanced scan() method** across all SDKs
+- **Full SQL support** in Python SDK (CREATE TABLE, INSERT, SELECT, JOIN, WHERE, GROUP BY)
+- **SQL integration** in Rust SDK via sochdb-query crate
+- **Bulk vector API** in Python SDK (~1,600 vec/s, 12× faster)
+- **Zero-copy reads** in Rust SDK
+- **Async IPC client** in Rust SDK with Tokio runtime
+- **Comprehensive SDK guides** in docs/guides/
+- **SQL API documentation**
+
+### Changed
+
+- Updated all SDK READMEs with v0.2.6 features
+- Improved documentation structure
+- Enhanced TypeScript definitions
+- Updated wire protocol documentation
+
+### Fixed
+
+- **Path operations** in JavaScript SDK now use correct wire format
+- Binary encoding issues in Go SDK
+- Python SDK _bin/ directory properly excluded from git
+- Scan range calculation using semicolon trick
+
+</Accordion>
+
+  <Accordion title="v0.2.3 - December 31, 2025" icon="code">
+
+## Multi-SDK Support
+
+### Added
+
+- Go SDK in-repo (`sochdb-go/`) with examples
+- Rust SDK guide and multi-language docs index updates
+
+### Fixed
+
+- TBP writer/reader null bitmap sizing
+- Crates.io publishability for workspace path dependencies
+
+</Accordion>
+
+  <Accordion title="v0.1.0 - December 27, 2024" icon="rocket">
+
+## Initial Release
+
+### Core Database
+
+- **ACID Transactions** with MVCC and Serializable Snapshot Isolation (SSI)
+- **Write-Ahead Log (WAL)** with group commit optimization
+- **Path-based data model** with O(|path|) resolution via Trie-Columnar Hybrid (TCH)
+- **Columnar storage** with automatic projection pushdown
+
+### LLM Features
+
+- **TOON Format** — 40-66% token reduction compared to JSON
+- **Context Query Builder** — token budgeting and priority-based truncation
+- **Vector Search** — HNSW index with F32/F16/BF16 quantization
+
+### Python SDK
+
+- **Embedded mode** via FFI for single-process applications
+- **IPC mode** via Unix sockets for multi-process scenarios
+- **Bulk API** for high-throughput vector operations
+- Pre-built wheels for Linux, macOS, Windows
+
+### MCP Integration
+
+- **sochdb-mcp** server for Claude Desktop, Cursor, and Goose
+- Tools: `sochdb_put`, `sochdb_get`, `sochdb_scan`, `sochdb_delete`, `sochdb_context_query`
+
+### Indexing
+
+- **HNSW** vector index with configurable parameters
+- **B-Tree** index for ordered key access
+- **Bloom filters** for existence checks
+
+### Performance
+
+- Optional ordered index for ~20% faster writes
+- Group commit reduces fsync overhead
+- Columnar storage minimizes I/O
+
+### Known Limitations
+
+- Single-node only (no distributed mode, replication, or clustering)
+
+</Accordion>
+</AccordionGroup>
+
+---
+
+## Version History
+
+| Version | Date | Highlights |
+|---------|------|------------|
+| **0.5.0** | 2026-02-15 | Lock-free GC, HNSW optimizations, columnar zero-allocation |
+| **0.4.1** | 2026-01-19 | Critical concurrency safety fix (66.5% data loss) |
+| **0.3.1** | 2026-01-04 | Anonymous analytics, privacy-first design |
+| **0.3.0** | 2026-01-03 | Namespace isolation, hybrid search, multi-vector docs |
+| **0.2.9** | 2026-01-02 | Comprehensive benchmarks, community health files |
+| **0.2.7** | 2026-01-01 | Full SQL support across all SDKs |
+| **0.2.6** | 2026-01-01 | Enhanced scan, bulk vector API |
+| **0.2.3** | 2025-12-31 | Multi-SDK support (Go, Rust) |
+| **0.1.0** | 2024-12-27 | Initial release |
+
+---
+
+## Upgrade Considerations
+
+<Warning>
+**Breaking changes** may occur between minor versions during the 0.x release cycle. Always review the changelog before upgrading.
+</Warning>
+
+### Key Breaking Changes
+
+- **v0.3.0**: Namespace API requires explicit namespace creation
+- **v0.2.7**: JavaScript stats() response format changed to JSON
+- **v0.4.1**: Database locking prevents concurrent multi-process access (by design)
+
+---
+
+## Links
+
+<CardGroup cols={2}>
+  <Card title="Documentation" icon="book" href="/index">
+    Complete documentation and guides
+  </Card>
+  <Card title="Contributing" icon="code-pull-request" href="/resources/contributing">
+    Contribution guidelines
+  </Card>
+  <Card title="Benchmarks" icon="chart-line" href="/resources/benchmarks">
+    Performance benchmarks
+  </Card>
+  <Card title="GitHub" icon="github" href="https://github.com/sochdb/sochdb">
+    Source code repository
+  </Card>
+</CardGroup>

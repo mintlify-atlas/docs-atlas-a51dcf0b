@@ -1,0 +1,608 @@
+---
+title: "SQL Queries (SELECT)"
+description: "SELECT statements, JOINs, aggregations, and query optimization in SochDB"
+---
+
+SochDB provides full SQL-92 compliant SELECT queries with support for complex WHERE clauses, JOINs, aggregations, and ordering.
+
+## Basic SELECT
+
+### Select All Columns
+
+```sql
+SELECT * FROM users;
+```
+
+### Select Specific Columns
+
+```sql
+SELECT name, email FROM users;
+```
+
+### Select with Aliases
+
+```sql
+SELECT name AS user_name, email AS contact_email FROM users;
+
+SELECT u.name, u.email FROM users AS u;
+```
+
+### DISTINCT
+
+Remove duplicate rows:
+
+```sql
+SELECT DISTINCT category FROM products;
+
+SELECT DISTINCT department, role FROM employees;
+```
+
+## WHERE Clause
+
+Filter rows based on conditions.
+
+### Comparison Operators
+
+```sql
+-- Equality
+SELECT * FROM users WHERE id = 1;
+
+-- Inequality
+SELECT * FROM users WHERE id != 1;
+SELECT * FROM users WHERE id <> 1;  -- Same as !=
+
+-- Greater than / Less than
+SELECT * FROM users WHERE age > 30;
+SELECT * FROM users WHERE age >= 30;
+SELECT * FROM users WHERE age < 25;
+SELECT * FROM users WHERE age <= 25;
+```
+
+### Logical Operators
+
+```sql
+-- AND
+SELECT * FROM users WHERE age > 25 AND active = 1;
+
+-- OR
+SELECT * FROM users WHERE name = 'Alice' OR name = 'Bob';
+
+-- NOT
+SELECT * FROM users WHERE NOT active = 0;
+
+-- Combined
+SELECT * FROM users WHERE (age >= 28 AND age <= 32) AND active = 1;
+```
+
+### IN Operator
+
+```sql
+SELECT * FROM users WHERE id IN (1, 3, 5);
+
+SELECT * FROM users WHERE name IN ('Alice', 'Bob', 'Charlie');
+
+SELECT * FROM users WHERE id NOT IN (2, 4, 6);
+```
+
+### BETWEEN Operator
+
+```sql
+SELECT * FROM users WHERE age BETWEEN 28 AND 32;
+
+SELECT * FROM orders WHERE created_at BETWEEN '2024-01-01' AND '2024-12-31';
+
+SELECT * FROM products WHERE price NOT BETWEEN 10.00 AND 100.00;
+```
+
+### LIKE Operator
+
+Pattern matching with wildcards:
+
+```sql
+-- Ends with
+SELECT * FROM users WHERE email LIKE '%@example.com';
+
+-- Starts with
+SELECT * FROM users WHERE name LIKE 'A%';
+
+-- Contains
+SELECT * FROM products WHERE description LIKE '%laptop%';
+
+-- Single character wildcard
+SELECT * FROM codes WHERE code LIKE 'A_C';  -- Matches 'ABC', 'AXC', etc.
+
+-- NOT LIKE
+SELECT * FROM users WHERE email NOT LIKE '%@spam.com';
+```
+
+### NULL Checks
+
+```sql
+-- IS NULL
+SELECT * FROM users WHERE email IS NULL;
+
+-- IS NOT NULL
+SELECT * FROM users WHERE email IS NOT NULL;
+```
+
+## Expressions
+
+### Arithmetic Expressions
+
+```sql
+-- Basic arithmetic
+SELECT price * 1.1 FROM products;  -- 10% markup
+SELECT price * quantity FROM order_items;
+SELECT (total - discount) AS final_price FROM orders;
+
+-- Operator precedence (multiplication before addition)
+SELECT 10 + 5 * 2 FROM dual;  -- Result: 20
+SELECT (10 + 5) * 2 FROM dual;  -- Result: 30
+```
+
+Supported operators:
+- `+` Addition
+- `-` Subtraction  
+- `*` Multiplication
+- `/` Division
+- `%` Modulo
+
+### String Expressions
+
+```sql
+-- String concatenation
+SELECT first_name || ' ' || last_name AS full_name FROM users;
+
+-- String functions
+SELECT UPPER(name) FROM users;
+SELECT LOWER(email) FROM users;
+SELECT LENGTH(name) FROM users;
+```
+
+### CASE Expressions
+
+```sql
+-- Simple CASE
+SELECT name,
+  CASE 
+    WHEN age < 30 THEN 'young'
+    WHEN age < 35 THEN 'middle'
+    ELSE 'senior'
+  END AS age_group
+FROM users;
+
+-- CASE in WHERE
+SELECT * FROM products
+WHERE CASE
+  WHEN category = 'Electronics' THEN price > 100
+  ELSE price > 50
+END;
+```
+
+### COALESCE
+
+Return first non-NULL value:
+
+```sql
+SELECT COALESCE(phone, email, 'No contact') AS contact FROM users;
+
+SELECT COALESCE(discount_price, regular_price) AS price FROM products;
+```
+
+## Functions
+
+### String Functions
+
+```sql
+SELECT UPPER(name) FROM users WHERE id = 1;  -- 'ALICE'
+SELECT LOWER(name) FROM users WHERE id = 1;  -- 'alice'
+SELECT LENGTH(name) FROM users WHERE id = 1;  -- 5
+```
+
+### Aggregate Functions
+
+```sql
+SELECT COUNT(*) FROM users;
+SELECT COUNT(DISTINCT category) FROM products;
+SELECT SUM(price) FROM products;
+SELECT AVG(age) FROM users;
+SELECT MIN(price) FROM products;
+SELECT MAX(price) FROM products;
+```
+
+### Type Conversion
+
+```sql
+SELECT CAST(price AS INTEGER) FROM products;
+SELECT CAST('123' AS INTEGER) AS num;
+SELECT CAST(3.14159 AS REAL) AS pi;
+```
+
+## ORDER BY
+
+Sort query results.
+
+### Ascending Order (default)
+
+```sql
+SELECT * FROM users ORDER BY age;
+SELECT * FROM users ORDER BY age ASC;
+```
+
+### Descending Order
+
+```sql
+SELECT * FROM users ORDER BY age DESC;
+```
+
+### Multiple Columns
+
+```sql
+SELECT * FROM users ORDER BY department ASC, salary DESC;
+```
+
+### NULL Handling
+
+```sql
+SELECT * FROM users ORDER BY email NULLS FIRST;
+SELECT * FROM users ORDER BY email NULLS LAST;
+```
+
+### Order by Expression
+
+```sql
+SELECT * FROM products ORDER BY price * quantity DESC;
+SELECT * FROM users ORDER BY LENGTH(name);
+```
+
+## LIMIT and OFFSET
+
+### Limit Results
+
+```sql
+SELECT * FROM users LIMIT 10;
+```
+
+### Pagination with OFFSET
+
+```sql
+-- Page 1 (first 10)
+SELECT * FROM users ORDER BY id LIMIT 10 OFFSET 0;
+
+-- Page 2 (next 10)
+SELECT * FROM users ORDER BY id LIMIT 10 OFFSET 10;
+
+-- Page 3 (next 10)
+SELECT * FROM users ORDER BY id LIMIT 10 OFFSET 20;
+```
+
+### Top N Query
+
+```sql
+-- Top 5 most expensive products
+SELECT * FROM products ORDER BY price DESC LIMIT 5;
+
+-- Oldest 10 users
+SELECT * FROM users ORDER BY created_at ASC LIMIT 10;
+```
+
+## GROUP BY
+
+Group rows for aggregation.
+
+### Basic Grouping
+
+```sql
+SELECT category, COUNT(*) FROM products GROUP BY category;
+
+SELECT department, AVG(salary) FROM employees GROUP BY department;
+```
+
+### Multiple Columns
+
+```sql
+SELECT department, role, COUNT(*) 
+FROM employees 
+GROUP BY department, role;
+```
+
+### With Aggregates
+
+```sql
+SELECT 
+  category,
+  COUNT(*) AS product_count,
+  AVG(price) AS avg_price,
+  MIN(price) AS min_price,
+  MAX(price) AS max_price
+FROM products
+GROUP BY category;
+```
+
+### HAVING Clause
+
+Filter grouped results:
+
+```sql
+-- Categories with more than 5 products
+SELECT category, COUNT(*) FROM products 
+GROUP BY category 
+HAVING COUNT(*) > 5;
+
+-- Departments with average salary > 50000
+SELECT department, AVG(salary) FROM employees
+GROUP BY department
+HAVING AVG(salary) > 50000;
+```
+
+## JOINs
+
+<Warning>
+**Current Support:** Two-table INNER JOIN only. LEFT/RIGHT/FULL JOIN planned for future release.
+</Warning>
+
+### INNER JOIN
+
+```sql
+SELECT users.name, orders.total
+FROM users
+INNER JOIN orders ON users.id = orders.user_id;
+```
+
+### JOIN with Aliases
+
+```sql
+SELECT u.name, o.total
+FROM users AS u
+INNER JOIN orders AS o ON u.id = o.user_id;
+```
+
+### JOIN with WHERE
+
+```sql
+SELECT u.name, o.total
+FROM users AS u
+INNER JOIN orders AS o ON u.id = o.user_id
+WHERE o.total > 100;
+```
+
+### CROSS JOIN
+
+```sql
+SELECT * FROM colors CROSS JOIN sizes;
+```
+
+### Not Yet Supported
+
+<Warning>
+The following JOIN types are **not yet implemented**:
+- LEFT JOIN / LEFT OUTER JOIN
+- RIGHT JOIN / RIGHT OUTER JOIN  
+- FULL JOIN / FULL OUTER JOIN
+- Multi-table JOINs (3+ tables)
+</Warning>
+
+## Subqueries
+
+### Subquery in WHERE
+
+```sql
+SELECT * FROM orders WHERE user_id IN (
+  SELECT id FROM users WHERE active = 1
+);
+```
+
+### Subquery in FROM
+
+```sql
+SELECT avg_salary FROM (
+  SELECT department, AVG(salary) AS avg_salary FROM employees GROUP BY department
+) AS dept_stats;
+```
+
+### EXISTS
+
+```sql
+SELECT * FROM users WHERE EXISTS (
+  SELECT 1 FROM orders WHERE orders.user_id = users.id
+);
+```
+
+## Set Operations
+
+### UNION
+
+Combine results from multiple queries (removes duplicates):
+
+```sql
+SELECT name FROM customers
+UNION
+SELECT name FROM suppliers;
+```
+
+### UNION ALL
+
+Combine results (keeps duplicates):
+
+```sql
+SELECT name FROM customers
+UNION ALL
+SELECT name FROM suppliers;
+```
+
+### INTERSECT
+
+Rows that appear in both queries:
+
+```sql
+SELECT email FROM users
+INTERSECT
+SELECT email FROM subscribers;
+```
+
+### EXCEPT
+
+Rows in first query but not in second:
+
+```sql
+SELECT email FROM users
+EXCEPT
+SELECT email FROM unsubscribed;
+```
+
+## SochDB Extensions
+
+### Vector Search
+
+Semantic similarity search over embeddings:
+
+```sql
+SELECT id, content, VECTOR_SEARCH(embedding, $1, 10, 'cosine') AS score
+FROM documents
+ORDER BY score DESC
+LIMIT 10;
+```
+
+Parameters:
+- `embedding` - Column containing vectors
+- `$1` - Query vector (parameter)
+- `10` - Number of neighbors (k)
+- `'cosine'` - Distance metric (cosine, euclidean, dot_product)
+
+### Context Window
+
+Token-aware LLM context assembly:
+
+```sql
+SELECT CONTEXT_WINDOW(content, 4096, relevance_score)
+FROM documents
+WHERE category = 'documentation'
+ORDER BY relevance_score DESC;
+```
+
+Parameters:
+- `content` - Text content
+- `4096` - Max tokens
+- `relevance_score` - Priority for truncation
+
+### JSON Access
+
+```sql
+-- JSON arrow operator (returns JSON)
+SELECT metadata -> 'user' FROM events;
+
+-- JSON double arrow (returns text)
+SELECT metadata ->> 'email' FROM events;
+```
+
+## Query Examples
+
+### Simple Analytics
+
+```sql
+-- Daily order totals
+SELECT DATE(created_at) AS date, SUM(total) AS daily_revenue
+FROM orders
+GROUP BY DATE(created_at)
+ORDER BY date DESC;
+
+-- Top customers by total spend
+SELECT u.name, SUM(o.total) AS total_spent
+FROM users u
+INNER JOIN orders o ON u.id = o.user_id
+GROUP BY u.id, u.name
+ORDER BY total_spent DESC
+LIMIT 10;
+```
+
+### Data Quality Checks
+
+```sql
+-- Find users without emails
+SELECT * FROM users WHERE email IS NULL OR email = '';
+
+-- Find duplicate emails
+SELECT email, COUNT(*) FROM users
+GROUP BY email
+HAVING COUNT(*) > 1;
+
+-- Products with invalid prices
+SELECT * FROM products WHERE price <= 0 OR price IS NULL;
+```
+
+### Complex Filtering
+
+```sql
+-- Active users in specific age range
+SELECT * FROM users
+WHERE active = 1
+  AND age BETWEEN 25 AND 45
+  AND email LIKE '%@company.com'
+  AND created_at >= '2024-01-01'
+ORDER BY created_at DESC;
+```
+
+## Query Optimization
+
+### Use Indexes
+
+```sql
+-- Create index for faster lookups
+CREATE INDEX idx_email ON users (email);
+
+-- Query benefits from index
+SELECT * FROM users WHERE email = 'alice@example.com';
+```
+
+### Projection Pushdown
+
+SochDB uses columnar storage - only requested columns are read:
+
+```sql
+-- Good: Only reads name and email columns
+SELECT name, email FROM users;
+
+-- Less efficient: Reads all columns
+SELECT * FROM users;
+```
+
+### Avoid SELECT *
+
+```sql
+-- Bad: Reads unnecessary data
+SELECT * FROM large_table;
+
+-- Good: Only read what you need
+SELECT id, name, status FROM large_table;
+```
+
+## Complexity
+
+| Operation | Time Complexity | Notes |
+|-----------|-----------------|-------|
+| SELECT (no index) | O(N) | Full table scan |
+| SELECT (with index) | O(log N + K) | K = result rows |
+| WHERE (no index) | O(N) | Evaluates every row |
+| WHERE (with index) | O(log N + K) | Uses index |
+| ORDER BY | O(N log N) | Unless index matches order |
+| GROUP BY | O(N log N) | Hash aggregation |
+| DISTINCT | O(N log N) | Hash deduplication |
+| JOIN (INNER) | O(N + M) | Hash join |
+
+## Limitations
+
+<Warning>
+**Current Limitations:**
+- LEFT/RIGHT/FULL JOIN not yet supported (only INNER)
+- Multi-table JOINs (3+ tables) limited
+- Correlated subqueries not supported
+- Window functions (ROW_NUMBER, RANK, etc.) planned for future
+- CTEs (WITH clause) planned for future
+</Warning>
+
+## See Also
+
+- [DDL (Data Definition)](/api/sql/ddl) - CREATE, DROP, ALTER
+- [DML (Data Manipulation)](/api/sql/dml) - INSERT, UPDATE, DELETE
+- [Vector Search](https://sochdb.dev/docs) - HNSW vector similarity
+- [Hybrid Retrieval](https://sochdb.dev/docs) - Vector + BM25 search

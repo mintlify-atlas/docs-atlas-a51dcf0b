@@ -1,0 +1,577 @@
+---
+title: 'Contributing'
+description: 'How to contribute to SochDB'
+icon: 'code-pull-request'
+---
+
+# Contributing to SochDB
+
+Thank you for your interest in contributing to SochDB! This guide will help you get started.
+
+<Note>
+SochDB is a **single-person project** built over weekends and spare time. Your contributions can make a real impact on advancing LLM-native data storage.
+</Note>
+
+---
+
+## Code of Conduct
+
+We are committed to providing a welcoming and inclusive environment. Please read and follow our [Code of Conduct](https://github.com/sochdb/sochdb/blob/main/CODE_OF_CONDUCT.md).
+
+**TL;DR:** Be respectful, be constructive, assume good intent.
+
+---
+
+## Quick Setup
+
+### One-Command Setup (Recommended)
+
+```bash
+# Clone, build, and test in one go
+git clone https://github.com/sochdb/sochdb.git && \
+cd sochdb && \
+make setup
+```
+
+The `make setup` command:
+1. Installs required Rust toolchain
+2. Installs development tools (clippy, rustfmt, cargo-watch)
+3. Builds all crates
+4. Runs the test suite
+5. Sets up git hooks
+
+### Manual Setup
+
+<Steps>
+  <Step title="Prerequisites">
+    | Requirement | Version | Check | Install |
+    |-------------|---------|-------|----------|
+    | **Rust** | ≥1.75.0 (2024 edition) | `rustc --version` | [rustup.rs](https://rustup.rs/) |
+    | **Git** | Any recent | `git --version` | OS package manager |
+    | **Clang** | ≥14 (optional, for SIMD) | `clang --version` | OS package manager |
+    | **Python** | ≥3.9 (for SDK) | `python --version` | OS package manager |
+  </Step>
+
+  <Step title="Fork and Clone">
+    ```bash
+    git clone https://github.com/YOUR_USERNAME/sochdb.git
+    cd sochdb
+    git remote add upstream https://github.com/sochdb/sochdb.git
+    ```
+  </Step>
+
+  <Step title="Install Rust">
+    ```bash
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+    source ~/.cargo/env
+    ```
+  </Step>
+
+  <Step title="Install Development Tools">
+    ```bash
+    cargo install cargo-watch cargo-criterion cargo-deny cargo-udeps
+    ```
+  </Step>
+
+  <Step title="Build and Test">
+    ```bash
+    cargo build --all
+    cargo test --all
+    cargo clippy --all -- -D warnings
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Development Environment
+
+### Recommended Tools
+
+```bash
+# Install useful development tools
+cargo install cargo-watch     # Auto-rebuild on changes
+cargo install cargo-criterion # Benchmarking
+cargo install cargo-deny      # Dependency auditing
+cargo install cargo-udeps     # Find unused dependencies
+cargo install cargo-expand    # Macro expansion
+```
+
+### VS Code Setup (Recommended)
+
+Create `.vscode/settings.json`:
+
+```json
+{
+    "rust-analyzer.cargo.features": "all",
+    "rust-analyzer.checkOnSave.command": "clippy",
+    "rust-analyzer.check.command": "clippy",
+    "editor.formatOnSave": true,
+    "editor.defaultFormatter": "rust-lang.rust-analyzer",
+    "[rust]": {
+        "editor.defaultFormatter": "rust-lang.rust-analyzer"
+    }
+}
+```
+
+**Recommended extensions:**
+- `rust-lang.rust-analyzer` — Rust language support
+- `vadimcn.vscode-lldb` — Debugger
+- `tamasfe.even-better-toml` — TOML support
+- `serayuzgur.crates` — Cargo.toml dependency management
+
+---
+
+## Directory Structure
+
+```
+sochdb/
+├── Cargo.toml              # Workspace manifest
+├── README.md               # Project overview
+├── CONTRIBUTING.md         # This file
+├── CHANGELOG.md            # Version history
+│
+├── docs/                   # Documentation
+│   ├── index.md
+│   ├── QUICKSTART.md
+│   └── tutorials/
+│
+├── sochdb-core/            # Core types & utilities
+│   └── src/
+│       ├── toon.rs         # SochValue enum
+│       ├── toon_codec.rs   # TOON format encoder/decoder
+│       └── path_trie.rs    # Trie-based path resolution
+│
+├── sochdb-kernel/          # Database engine
+│   └── src/
+│       ├── wal.rs          # Write-ahead log
+│       ├── transaction.rs  # MVCC transactions
+│       └── plugin.rs       # Plugin system
+│
+├── sochdb-index/           # Index implementations
+│   └── src/
+│       ├── hnsw.rs         # HNSW vector index
+│       ├── btree.rs        # B-tree index
+│       └── bloom.rs        # Bloom filters
+│
+├── sochdb-query/           # Query engine
+│   └── src/
+│       ├── parser.rs       # Query parsing
+│       ├── planner.rs      # Query planning
+│       └── executor.rs     # Query execution
+│
+├── sochdb-client/          # Client SDK
+├── sochdb-python/          # Python bindings (PyO3)
+├── sochdb-mcp/             # MCP server for LLMs
+├── sochdb-grpc/            # gRPC server
+│
+├── benchmarks/             # Performance benchmarks
+└── examples/               # Example code
+```
+
+### Key Files for New Contributors
+
+<CardGroup cols={2}>
+  <Card title="sochdb-core/src/toon.rs" icon="cube">
+    Core value type — start here
+  </Card>
+  <Card title="sochdb-kernel/src/wal.rs" icon="book">
+    Durability implementation
+  </Card>
+  <Card title="sochdb-index/src/hnsw.rs" icon="magnifying-glass">
+    Vector search algorithm
+  </Card>
+  <Card title="sochdb-kernel/src/transaction.rs" icon="lock">
+    MVCC implementation
+  </Card>
+</CardGroup>
+
+---
+
+## Making Changes
+
+### Branch Naming Convention
+
+```
+feature/description    # New features
+fix/issue-number       # Bug fixes
+docs/description       # Documentation
+perf/description       # Performance improvements
+refactor/description   # Code refactoring
+```
+
+### Commit Messages
+
+Follow [Conventional Commits](https://www.conventionalcommits.org/):
+
+```
+<type>(<scope>): <description>
+
+[optional body]
+
+[optional footer]
+```
+
+**Types:**
+- `feat`: New feature
+- `fix`: Bug fix
+- `docs`: Documentation
+- `style`: Formatting (no code change)
+- `refactor`: Code restructuring
+- `perf`: Performance improvement
+- `test`: Adding tests
+- `chore`: Maintenance tasks
+
+**Examples:**
+
+<CodeGroup>
+```text Feature
+feat(hnsw): add parallel index construction
+
+Implement parallel insertion using rayon. This improves
+build performance by ~4x on 8-core machines.
+
+Closes #123
+```
+
+```text Bug Fix
+fix(wal): handle truncated records during recovery
+
+Previously, truncated WAL records at the end of the file
+would cause a panic. Now they are silently skipped with
+a warning log.
+
+Fixes #456
+```
+</CodeGroup>
+
+---
+
+## Testing
+
+### Running Tests
+
+```bash
+# All tests
+cargo test --all
+
+# Specific crate
+cargo test -p sochdb-kernel
+
+# Specific test
+cargo test -p sochdb-index test_hnsw_insert
+
+# With output
+cargo test -- --nocapture
+
+# Ignored (slow) tests
+cargo test -- --ignored
+```
+
+### Writing Tests
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn insert_and_retrieve_returns_same_value() {
+        let dir = TempDir::new().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        
+        db.put(b"key", b"value").unwrap();
+        let result = db.get(b"key").unwrap();
+        
+        assert_eq!(result, Some(b"value".to_vec()));
+    }
+
+    #[test]
+    fn get_nonexistent_key_returns_none() {
+        let dir = TempDir::new().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        
+        let result = db.get(b"missing").unwrap();
+        
+        assert_eq!(result, None);
+    }
+}
+```
+
+### Coverage Requirements
+
+| Crate | Minimum Coverage |
+|-------|------------------|
+| sochdb-core | 80% |
+| sochdb-kernel | 75% |
+| sochdb-index | 70% |
+| Others | 60% |
+
+---
+
+## Pull Request Process
+
+### Before Submitting
+
+<Steps>
+  <Step title="Run the Full Check Suite">
+    ```bash
+    # One-command validation
+    make check
+
+    # Or manually:
+    cargo fmt --all --check           # Formatting
+    cargo clippy --all -- -D warnings # Lints  
+    cargo test --all                  # Tests
+    cargo doc --no-deps               # Documentation builds
+    ```
+  </Step>
+
+  <Step title="Create Your PR">
+    1. Create a branch from `main`
+    2. Make your changes with tests
+    3. Push and create PR on GitHub
+  </Step>
+
+  <Step title="Fill Out PR Template">
+    ## Summary
+    Brief description of changes.
+
+    ## Type
+    - [ ] Bug fix
+    - [ ] New feature
+    - [ ] Breaking change
+    - [ ] Documentation
+
+    ## Testing
+    - [ ] Added new tests
+    - [ ] All tests pass locally
+    - [ ] Tested manually
+
+    ## Checklist
+    - [ ] Code compiles without warnings
+    - [ ] Follows code style guidelines
+    - [ ] Documentation updated
+    - [ ] CHANGELOG.md updated (if notable)
+  </Step>
+</Steps>
+
+### Review Timeline
+
+| PR Type | Initial Review | Merge Time |
+|---------|----------------|------------|
+| Bug fix | 1-2 days | 2-3 days |
+| Feature | 3-5 days | 1-2 weeks |
+| Breaking change | 1 week | 2-3 weeks |
+| Documentation | 1-2 days | 2-3 days |
+
+### Review Process
+
+<Steps>
+  <Step title="Maintainers Review">
+    Within 3 business days
+  </Step>
+  <Step title="Address Feedback">
+    Push new commits (don't force-push)
+  </Step>
+  <Step title="CI Must Pass">
+    All checks green
+  </Step>
+  <Step title="Approvals Required">
+    Two approvals for core crates
+  </Step>
+  <Step title="Maintainer Merges">
+    Via squash merge
+  </Step>
+</Steps>
+
+---
+
+## Code Style
+
+### Rust Style Guidelines
+
+Follow the [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/):
+
+<AccordionGroup>
+  <Accordion title="Naming Conventions" icon="tag">
+    ```rust
+    // Use descriptive names
+    fn calculate_optimal_batch_size(arrival_rate: f64) -> usize { ... }
+
+    // Type aliases for clarity
+    pub type EdgeId = u64;
+    pub type VectorId = u32;
+
+    // Prefer enums over boolean flags
+    pub enum SyncMode {
+        Full,
+        Normal,
+        Off,
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Documentation" icon="book">
+    ```rust
+    /// Inserts a vector into the index.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Unique identifier for the vector
+    /// * `vector` - The embedding vector
+    ///
+    /// # Returns
+    ///
+    /// The node index in the graph, or an error if insertion fails.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// let index = HNSWIndex::new();
+    /// index.insert(1, &[0.1, 0.2, 0.3])?;
+    /// ```
+    pub fn insert(&self, id: u64, vector: &[f32]) -> Result<usize, Error> {
+        // Implementation
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Error Handling" icon="triangle-exclamation">
+    ```rust
+    // Use thiserror for library errors
+    #[derive(Debug, thiserror::Error)]
+    pub enum KernelError {
+        #[error("I/O error: {0}")]
+        Io(#[from] std::io::Error),
+        
+        #[error("transaction {txn_id} has been aborted")]
+        TransactionAborted { txn_id: u64 },
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Performance" icon="gauge-high">
+    ```rust
+    // Avoid allocations in hot paths
+    fn process_records(&self, records: &[Record]) {
+        // Pre-allocate
+        let mut buffer = Vec::with_capacity(records.len() * 64);
+        
+        for record in records {
+            buffer.clear();
+            self.serialize_into(&mut buffer, record);
+        }
+    }
+
+    // Mark inline for small hot functions
+    #[inline]
+    fn compute_distance(&self, a: &[f32], b: &[f32]) -> f32 {
+        a.iter().zip(b).map(|(x, y)| (x - y).powi(2)).sum::<f32>().sqrt()
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Design Principles
+
+<CardGroup cols={2}>
+  <Card title="Zero-Copy" icon="bolt">
+    Use `&[u8]` slices and `memmap2` where possible
+  </Card>
+  <Card title="Lock-Free Reads" icon="unlock">
+    MVCC snapshots, atomic operations
+  </Card>
+  <Card title="Minimal Allocations" icon="layer-group">
+    Arena allocators, object pools
+  </Card>
+  <Card title="Fail-Safe" icon="shield">
+    CRC32 checksums, WAL recovery
+  </Card>
+</CardGroup>
+
+---
+
+## Getting Help
+
+### Resources
+
+<CardGroup cols={2}>
+  <Card title="Documentation" icon="book" href="/index">
+    User guides and tutorials
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="https://github.com/sochdb/sochdb/blob/main/docs/ARCHITECTURE.md">
+    Technical deep-dives
+  </Card>
+  <Card title="API Reference" icon="code" href="https://github.com/sochdb/sochdb/blob/main/docs/API.md">
+    API documentation
+  </Card>
+  <Card title="GitHub Issues" icon="github" href="https://github.com/sochdb/sochdb/issues">
+    Bug reports and features
+  </Card>
+</CardGroup>
+
+### First-Time Contributors
+
+Look for issues labeled:
+- `good first issue` — Beginner-friendly
+- `help wanted` — We need your help
+- `documentation` — Docs improvements
+
+---
+
+## Release Process
+
+<Steps>
+  <Step title="Update CHANGELOG.md">
+    Add release notes
+  </Step>
+  <Step title="Bump Versions">
+    Update `Cargo.toml` files
+  </Step>
+  <Step title="Create Release PR">
+    For review
+  </Step>
+  <Step title="Tag Release">
+    `git tag v0.1.x` after merge
+  </Step>
+  <Step title="CI Publishes">
+    Automated publishing to crates.io
+  </Step>
+</Steps>
+
+### Versioning
+
+We follow [Semantic Versioning](https://semver.org/):
+- **MAJOR**: Breaking API changes
+- **MINOR**: New features, backwards compatible
+- **PATCH**: Bug fixes, backwards compatible
+
+---
+
+## A Note from the Creator
+
+<Note>
+**This is an MVP — and your support makes it better.**
+
+SochDB started as an experiment: *what if databases were designed for LLMs from day one?* The result is what you see here — a working, tested, and (I hope) useful database.
+
+**Software gets better with users.** Every bug report, feature request, and "hey, this broke" message helps SochDB become more robust.
+
+**What I need from you:**
+- Report bugs — even small ones
+- Request features — what's missing for your use case?
+- Star the repo — it helps others discover SochDB
+- Share your experience — blog posts, tweets, anything
+
+Your usage and feedback don't just help me — they help everyone building with SochDB. Let's make this great together.
+
+*— Sushanth*
+</Note>
+
+---
+
+Thank you for contributing to SochDB!
