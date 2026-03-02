@@ -1,0 +1,160 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "SochDB",
+  "projectDescription": "High-performance embedded, ACID-compliant vector database purpose-built for AI agents and memory",
+  "theme": "aspen",
+  "primaryColor": "#6366f1",
+  "lightColor": "#818cf8",
+  "darkColor": "#4f46e5",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/toon-format",
+              "concepts/acid-transactions",
+              "concepts/vector-search"
+            ]
+          },
+          {
+            "group": "SDK Guides",
+            "pages": [
+              "sdks/python",
+              "sdks/nodejs",
+              "sdks/go",
+              "sdks/rust"
+            ]
+          },
+          {
+            "group": "Features",
+            "pages": [
+              "features/hybrid-search",
+              "features/graph-overlay",
+              "features/context-query",
+              "features/namespace-isolation",
+              "features/policy-hooks"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/embedded",
+              "deployment/docker",
+              "deployment/mcp-server"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Python API",
+            "pages": [
+              "api/python/database",
+              "api/python/vector-index",
+              "api/python/graph-overlay",
+              "api/python/transactions"
+            ]
+          },
+          {
+            "group": "Rust API",
+            "pages": [
+              "api/rust/connection",
+              "api/rust/queries",
+              "api/rust/vectors",
+              "api/rust/batch-operations"
+            ]
+          },
+          {
+            "group": "SQL Reference",
+            "pages": [
+              "api/sql/ddl",
+              "api/sql/dml",
+              "api/sql/queries"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Examples",
+        "groups": [
+          {
+            "group": "Use Cases",
+            "pages": [
+              "examples/rag-system",
+              "examples/agent-memory",
+              "examples/semantic-cache",
+              "examples/multi-tenant"
+            ]
+          },
+          {
+            "group": "Integrations",
+            "pages": [
+              "examples/langgraph",
+              "examples/crewai",
+              "examples/claude-mcp"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Resources",
+        "groups": [
+          {
+            "group": "Additional Resources",
+            "pages": [
+              "resources/benchmarks",
+              "resources/changelog",
+              "resources/contributing",
+              "resources/faq"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "TOON format: 40-66% fewer tokens than JSON for LLM context",
+    "Embedded ACID database with MVCC and WAL durability",
+    "Built-in HNSW vector search with hybrid (vector + BM25) retrieval",
+    "Graph overlay for agent memory with BFS/DFS traversal",
+    "Context query builder with automatic token budgeting",
+    "Multi-language SDKs: Python, Node.js, Go, Rust",
+    "Namespace isolation for multi-tenant applications",
+    "MCP (Model Context Protocol) server for Claude integration",
+    "Docker deployment with gRPC server support",
+    "Columnar storage with 80% I/O reduction"
+  ],
+  "publicApiSurface": [
+    "Database.open() - Open database connection",
+    "Database.put() - Store key-value pairs",
+    "Database.get() - Retrieve values",
+    "Database.transaction() - ACID transactions",
+    "VectorIndex - HNSW vector search",
+    "VectorIndex.add() - Insert vectors",
+    "VectorIndex.search() - Similarity search",
+    "VectorIndex.hybrid_search() - Vector + keyword fusion",
+    "GraphOverlay - Agent memory graph",
+    "GraphOverlay.add_node() - Create graph nodes",
+    "GraphOverlay.add_edge() - Link nodes",
+    "GraphOverlay.bfs() - Breadth-first traversal",
+    "ContextQuery - Token-aware retrieval",
+    "ContextQuery.with_token_budget() - Set token limits",
+    "namespace() - Multi-tenant isolation",
+    "create_collection() - Vector collections",
+    "SQL queries - SELECT/INSERT/UPDATE/DELETE"
+  ]
+}
